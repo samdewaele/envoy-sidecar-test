@@ -88,9 +88,11 @@ spec:
               containerPort: {{ .Values.envoy.ports.appPort }}
               protocol: TCP
           readinessProbe:
-            httpGet:
-              path: /health
-              port: {{ .Values.envoy.ports.appPort }}
+            exec:
+              command:
+                - curl
+                - -sf
+                - http://127.0.0.1:{{ .Values.envoy.ports.appPort }}/health
             initialDelaySeconds: 3
             periodSeconds: 5
           resources:

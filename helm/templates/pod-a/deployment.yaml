@@ -92,9 +92,13 @@ spec:
               containerPort: {{ .Values.envoy.ports.appPort }}
               protocol: TCP
           readinessProbe:
-            httpGet:
-              path: /health
-              port: {{ .Values.envoy.ports.appPort }}
+            # exec probe: runs inside the container so it can reach 127.0.0.1.
+            # httpGet from the kubelet cannot reach localhost-only bindings.
+            exec:
+              command:
+                - curl
+                - -sf
+                - http://127.0.0.1:{{ .Values.envoy.ports.appPort }}/health
             initialDelaySeconds: 3
             periodSeconds: 5
           resources:

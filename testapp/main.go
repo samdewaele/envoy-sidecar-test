@@ -68,18 +68,21 @@ func loadTLSConfig() *tls.Config {
 	return cfg
 }
 
-// listenAndServe starts an HTTP(S) server. If tlsCfg is non-nil, it wraps
-// the listener in TLS so the server speaks HTTPS with mTLS.
-func listenAndServe(addr string, handler http.Handler, tlsCfg *tls.Config) error {
+// listenAndServe starts an HTTP(S) server.
+// IMPORTANT: always binds to 127.0.0.1 (loopback only).
+// The app must never be reachable directly from the pod network — all
+// inbound traffic must arrive through the Envoy sidecar on port 8443.
+func listenAndServe(port string, handler http.Handler, tlsCfg *tls.Config) error {
+	addr := "127.0.0.1:" + port
 	if tlsCfg != nil {
 		ln, err := tls.Listen("tcp", addr, tlsCfg)
 		if err != nil {
 			return err
 		}
-		log.Printf("listening on %s (HTTPS/mTLS)", addr)
+		log.Printf("listening on %s (HTTPS/mTLS, loopback only)", addr)
 		return http.Serve(ln, handler)
 	}
-	log.Printf("listening on %s (HTTP — no TLS)", addr)
+	log.Printf("listening on %s (HTTP, loopback only)", addr)
 	return http.ListenAndServe(addr, handler)
 }
 
@@ -239,14 +242,15 @@ func registerPodB(mux *http.ServeMux, clientTLS *tls.Config) {
 // runTCPMock starts a TLS (or plain) TCP echo server for the Kafka mock.
 func runTCPMock(tcpPort string, tlsCfg *tls.Config) {
 	go func() {
+		addr := "127.0.0.1:" + tcpPort
 		var ln net.Listener
 		var err error
 		if tlsCfg != nil {
-			ln, err = tls.Listen("tcp", ":"+tcpPort, tlsCfg)
-			log.Printf("TCP mock listening on :%s (TLS/mTLS)", tcpPort)
+			ln, err = tls.Listen("tcp", addr, tlsCfg)
+			log.Printf("TCP mock listening on %s (TLS/mTLS, loopback only)", addr)
 		} else {
-			ln, err = net.Listen("tcp", ":"+tcpPort)
-			log.Printf("TCP mock listening on :%s (plain)", tcpPort)
+			ln, err = net.Listen("tcp", addr)
+			log.Printf("TCP mock listening on %s (plain, loopback only)", addr)
 		}
 		if err != nil {
 			log.Printf("TCP mock listen error: %v", err)
@@ -297,7 +301,7 @@ func main() {
 	}
 
 	log.Printf("testapp starting  role=%s  port=%s  tls=%v", role, port, serverTLS != nil)
-	if err := listenAndServe(":"+port, mux, serverTLS); err != nil {
+	if err := listenAndServe(port, mux, serverTLS); err != nil {
 		log.Fatal(err)
 	}
 }
