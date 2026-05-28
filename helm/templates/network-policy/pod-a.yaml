@@ -1,0 +1,80 @@
+{{- if .Values.networkPolicy.enabled }}
+{{/*
+NetworkPolicy for Pod A.
+
+Ingress: only HAProxy may connect to Pod A's Envoy inbound port.
+Egress:
+  - Pod B service (Envoy inbound)
+  - Kafka mock
+  - LLM gateway mock
+  - Cluster DNS (required for STRICT_DNS resolution in Envoy)
+
+Combined with Envoy's outbound listeners this gives two enforcement layers:
+  Layer 1 (NetworkPolicy): blocks any destination not in this list, regardless
+           of whether traffic goes through Envoy or comes directly from the app.
+  Layer 2 (Envoy):         mTLS, RBAC logging/enforcement on allowed destinations.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pod-a-netpol
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: pod-a
+spec:
+  podSelector:
+    matchLabels:
+      app: pod-a
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Only HAProxy may reach Pod A's Envoy inbound port
+    - from:
+        - podSelector:
+            matchLabels:
+              app: haproxy
+      ports:
+        - port: {{ .Values.envoy.ports.inbound }}
+          protocol: TCP
+
+  egress:
+    # ── Cluster DNS — required for Envoy STRICT_DNS cluster resolution ────────
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+    # ── Pod B ─────────────────────────────────────────────────────────────────
+    - to:
+        - podSelector:
+            matchLabels:
+              app: pod-b
+      ports:
+        - port: {{ .Values.envoy.ports.inbound }}
+          protocol: TCP
+
+    # ── Kafka ─────────────────────────────────────────────────────────────────
+    - to:
+        - podSelector:
+            matchLabels:
+              app: kafka-mock
+      ports:
+        - port: {{ .Values.mocks.kafka.tcpPort }}
+          protocol: TCP
+
+    # ── LLM Gateway ───────────────────────────────────────────────────────────
+    - to:
+        - podSelector:
+            matchLabels:
+              app: llm-gateway-mock
+      ports:
+        - port: {{ .Values.mocks.llmGateway.httpPort }}
+          protocol: TCP
+
+    # ── Envoy admin (localhost only — no egress needed, just self) ────────────
+    # No entry needed: loopback traffic is always allowed and not covered by
+    # NetworkPolicy (it never leaves the pod's network namespace).
+{{- end }}

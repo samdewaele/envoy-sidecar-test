@@ -1,0 +1,20 @@
+{{- if .Values.haproxy.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: haproxy
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: haproxy
+spec:
+  selector:
+    app: haproxy
+  ports:
+    - name: mtls
+      port: {{ .Values.haproxy.port }}
+      targetPort: {{ .Values.haproxy.port }}
+      protocol: TCP
+  # ClusterIP only — haproxy is an internal tier, not exposed outside the cluster.
+  # Only f5-sim should reach it (enforced by NetworkPolicy).
+  type: ClusterIP
+{{- end }}

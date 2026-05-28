@@ -1,0 +1,53 @@
+{{- if .Values.haproxy.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: haproxy
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: haproxy
+spec:
+  replicas: {{ .Values.haproxy.replicas }}
+  selector:
+    matchLabels:
+      app: haproxy
+  template:
+    metadata:
+      labels:
+        app: haproxy
+    spec:
+      containers:
+        - name: haproxy
+          image: {{ .Values.global.imageRegistry }}{{ .Values.haproxy.image }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: mtls
+              containerPort: {{ .Values.haproxy.port }}
+              protocol: TCP
+          volumeMounts:
+            - name: haproxy-config
+              mountPath: /usr/local/etc/haproxy/haproxy.cfg
+              subPath: haproxy.cfg
+            - name: haproxy-certs
+              mountPath: /certs
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.haproxy.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+      volumes:
+        - name: haproxy-config
+          configMap:
+            name: haproxy-config
+        - name: haproxy-certs
+          secret:
+            secretName: {{ .Values.haproxy.tls.secretName }}
+{{- end }}

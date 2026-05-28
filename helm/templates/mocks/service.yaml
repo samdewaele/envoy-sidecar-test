@@ -1,0 +1,77 @@
+{{- if .Values.mocks.kafka.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-mock
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    app: kafka-mock
+  ports:
+    - name: tcp
+      port: {{ .Values.mocks.kafka.tcpPort }}
+      targetPort: {{ .Values.mocks.kafka.tcpPort }}
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+{{- end }}
+{{- if .Values.mocks.llmGateway.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-gateway-mock
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    app: llm-gateway-mock
+  ports:
+    - name: http
+      port: {{ .Values.mocks.llmGateway.httpPort }}
+      targetPort: {{ .Values.mocks.llmGateway.httpPort }}
+---
+{{- end }}
+{{- if .Values.mocks.sts.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: sts-mock
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    app: sts-mock
+  ports:
+    - name: http
+      port: {{ .Values.mocks.sts.httpPort }}
+      targetPort: {{ .Values.mocks.sts.httpPort }}
+---
+{{- end }}
+{{- if .Values.mocks.internalAPI.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: internal-api-mock
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    app: internal-api-mock
+  ports:
+    - name: http
+      port: {{ .Values.mocks.internalAPI.httpPort }}
+      targetPort: {{ .Values.mocks.internalAPI.httpPort }}
+---
+{{- end }}
+{{- if .Values.mocks.blocked.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: blocked-mock
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    app: blocked-mock
+  ports:
+    - name: http
+      port: {{ .Values.mocks.blocked.httpPort }}
+      targetPort: {{ .Values.mocks.blocked.httpPort }}
+{{- end }}

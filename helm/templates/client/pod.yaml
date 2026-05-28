@@ -1,0 +1,36 @@
+{{- if .Values.client.enabled }}
+# Long-running client pod — exec into it to fire test requests.
+# kubectl exec -n envoy-test -it client -- /bin/sh
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: client
+spec:
+  restartPolicy: Always
+  containers:
+    - name: client
+      image: {{ .Values.global.imageRegistry }}{{ .Values.client.image }}
+      imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+      command: ["sh", "-c", "while true; do sleep 3600; done"]
+      volumeMounts:
+        - name: client-certs
+          mountPath: /certs
+          readOnly: true
+      env:
+        - name: HAPROXY_HOST
+          value: "haproxy.{{ .Values.global.namespace }}.svc.cluster.local"
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 32Mi
+  volumes:
+    - name: client-certs
+      secret:
+        secretName: {{ .Values.client.tls.secretName }}
+{{- end }}

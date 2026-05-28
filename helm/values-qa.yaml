@@ -1,0 +1,22 @@
+# =============================================================================
+# QA overrides
+# mTLS is ON. Whitelist rules are evaluated and LOGGED but traffic is not
+# blocked.  Watch Envoy logs for [WHITELIST-VIOLATION] lines.
+# =============================================================================
+
+envoy:
+  mode: qa
+
+podA:
+  inbound:
+    allowedSourceCIDRs:
+      - "10.0.0.0/8"    # internal cluster range — tighten to HAProxy pod CIDR
+    allowedClientCNs:
+      - "test-client"
+
+podB:
+  inbound:
+    allowedSourceCIDRs:
+      - "10.0.0.0/8"
+    allowedClientCNs:
+      - "pod-a"

@@ -1,0 +1,9 @@
+apiVersion: v2
+name: envoy-sidecar-test
+description: >
+  Toy test stack for the Envoy sidecar pattern.
+  Deploys Pod A + Pod B each with an Envoy sidecar, HAProxy (simulating F5
+  re-encrypt), mock upstream targets, and a test-client pod.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

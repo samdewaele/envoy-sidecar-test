@@ -1,0 +1,19 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: envoy-sidecar-test
+
+networking:
+  # Disable kindnet so we can install Calico, which supports NetworkPolicy.
+  # Without this, NetworkPolicy resources are accepted by the API server
+  # but silently ignored — nothing gets blocked.
+  disableDefaultCNI: true
+
+nodes:
+  - role: control-plane
+    # Expose f5-sim NodePort 30443 → localhost:30443
+    extraPortMappings:
+      - containerPort: 30443
+        hostPort: 30443
+        protocol: TCP
+  - role: worker
+  - role: worker

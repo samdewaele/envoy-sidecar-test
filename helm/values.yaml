@@ -1,0 +1,191 @@
+# =============================================================================
+# Base values — apply to all environments.
+# Override per-environment in values-dev.yaml / values-qa.yaml / values-prod.yaml
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Global
+# ---------------------------------------------------------------------------
+global:
+  namespace: envoy-test
+  imageRegistry: ""          # prefix for all images, e.g. "registry.mybank.internal/"
+  imagePullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------------------
+# Envoy sidecar — shared settings
+# ---------------------------------------------------------------------------
+envoy:
+  # mode controls enforcement level:
+  #   dev  — sidecar present, all traffic allowed, no TLS enforced
+  #   qa   — mTLS on, whitelists evaluated but violations only LOGGED
+  #   prod — mTLS on, whitelists hard-enforced, violations DROPPED
+  mode: dev
+
+  image: envoyproxy/envoy:v1.31-latest
+
+  ports:
+    inbound: 8443          # Envoy listens here; exposed as the pod's service port
+    appPort: 9090          # App container listens here (localhost only)
+    admin: 9901            # Envoy admin interface (localhost only)
+
+    # Outbound localhost listeners — app connects to these instead of real addresses
+    outboundPodB:      19080
+    outboundKafka:     19092
+    outboundLLM:       14443
+    outboundSTS:       19093
+    outboundInternal:  19094
+    outboundBlocked:   19999   # "forbidden" target used to test violation behaviour
+
+  tls:
+    secretName: envoy-certs   # must contain: tls.crt, tls.key, ca.crt
+    mountPath: /certs
+
+  accessLogFormat: >
+    [%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%
+    %PROTOCOL%" %RESPONSE_CODE% %RESPONSE_FLAGS%
+    %BYTES_SENT% cn="%REQ(X-SSL-CLIENT-CN)%" shadow=%DYNAMIC_METADATA(envoy.filters.http.rbac:shadow_engine_result)%
+
+# ---------------------------------------------------------------------------
+# f5-sim — nginx simulating the F5 BIG-IP
+#
+# Traffic flow:
+#   test-client ──mTLS──▶ f5-sim:443 ──HTTP+X-SSL-Client-CN──▶ haproxy:8080
+#
+# f5-sim terminates the external client TLS, extracts the client cert CN,
+# and forwards plain HTTP with the CN header to HAProxy.
+# ---------------------------------------------------------------------------
+f5Sim:
+  enabled: true
+  image: nginx:1.27-alpine
+  replicas: 1
+
+  service:
+    type: NodePort
+    port: 443
+    nodePort: 30443      # access via https://localhost:30443 from the host machine
+
+  tls:
+    secretName: f5-sim-certs   # contains: tls.crt, tls.key, ca.crt
+
+# ---------------------------------------------------------------------------
+# HAProxy — re-encrypts from f5-sim toward Pod A's Envoy
+#
+# Traffic flow:
+#   f5-sim ──HTTP+header──▶ haproxy:8080 ──TLS──▶ pod-a-service:8443
+# ---------------------------------------------------------------------------
+haproxy:
+  enabled: true
+  image: haproxy:2.9-alpine
+  replicas: 1
+  port: 443              # HAProxy listens here for mTLS traffic from f5-sim
+
+  tls:
+    secretName: haproxy-certs   # contains: haproxy.pem (cert+key bundle), ca.crt
+
+# ---------------------------------------------------------------------------
+# Pod A
+# ---------------------------------------------------------------------------
+podA:
+  name: pod-a
+  replicas: 1
+  image: ""   # set to your testapp image, e.g. "localhost:5001/testapp:latest"
+
+  service:
+    port: 8443    # == envoy.ports.inbound
+
+  inbound:
+    allowedSourceCIDRs:
+      - "0.0.0.0/0"   # DEV default — tightened in qa/prod values
+    allowedClientCNs:
+      - "test-client"
+    cnHeader: "X-SSL-Client-CN"
+
+  outbound:
+    podB:
+      address: pod-b-service
+      port: 8443        # Pod B's Envoy inbound port
+    kafka:
+      address: kafka-mock
+      port: 9092
+    llmGateway:
+      address: llm-gateway-mock
+      port: 8080
+
+# ---------------------------------------------------------------------------
+# Pod B
+# ---------------------------------------------------------------------------
+podB:
+  name: pod-b
+  replicas: 1
+  image: ""
+
+  service:
+    port: 8443    # == envoy.ports.inbound (Pod B also uses Envoy on 8443)
+
+  inbound:
+    allowedSourceCIDRs:
+      - "0.0.0.0/0"   # DEV default
+    allowedClientCNs:
+      - "pod-a"
+    cnHeader: "X-SSL-Client-CN"
+
+  outbound:
+    kafka:
+      address: kafka-mock
+      port: 9092
+    sts:
+      address: sts-mock
+      port: 8080
+    internalAPI:
+      address: internal-api-mock
+      port: 8080
+
+# ---------------------------------------------------------------------------
+# NetworkPolicy
+#
+# Requires a CNI that supports NetworkPolicy (Calico, Cilium, Weave).
+# Kind's default CNI (kindnet) does NOT support it.
+# The Makefile installs Calico automatically when networkPolicy.enabled=true.
+#
+# What this adds on top of Envoy:
+#   - Hard-blocks unauthorized destinations at the kernel network level
+#   - Prevents apps from bypassing Envoy and calling external targets directly
+#   - Works regardless of which process (app or sidecar) initiates the connection
+# ---------------------------------------------------------------------------
+networkPolicy:
+  enabled: true
+
+# ---------------------------------------------------------------------------
+# Mock targets
+# ---------------------------------------------------------------------------
+mocks:
+  image: ""   # same testapp image, APP_ROLE=mock
+
+  kafka:
+    enabled: true
+    tcpPort: 9092
+
+  llmGateway:
+    enabled: true
+    httpPort: 8080
+
+  sts:
+    enabled: true
+    httpPort: 8080
+
+  internalAPI:
+    enabled: true
+    httpPort: 8080
+
+  blocked:
+    enabled: true
+    httpPort: 8080
+
+# ---------------------------------------------------------------------------
+# Test client
+# ---------------------------------------------------------------------------
+client:
+  enabled: true
+  image: curlimages/curl:8.7.1
+  tls:
+    secretName: client-certs   # contains: client.crt, client.key, ca.crt

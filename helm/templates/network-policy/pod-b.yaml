@@ -1,0 +1,65 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pod-b-netpol
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: pod-b
+spec:
+  podSelector:
+    matchLabels:
+      app: pod-b
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Only Pod A may reach Pod B's Envoy inbound port.
+    # Even if the app in Pod A tries to bypass its own Envoy and call Pod B
+    # directly, NetworkPolicy allows it (same pod CIDR) — but Pod B's Envoy
+    # will reject it because require_client_certificate: true means it needs
+    # a valid mTLS cert. That cert is only in the Envoy sidecar, not the app.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: pod-a
+      ports:
+        - port: {{ .Values.envoy.ports.inbound }}
+          protocol: TCP
+
+  egress:
+    # ── Cluster DNS ───────────────────────────────────────────────────────────
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+    # ── Kafka ─────────────────────────────────────────────────────────────────
+    - to:
+        - podSelector:
+            matchLabels:
+              app: kafka-mock
+      ports:
+        - port: {{ .Values.mocks.kafka.tcpPort }}
+          protocol: TCP
+
+    # ── STS ───────────────────────────────────────────────────────────────────
+    - to:
+        - podSelector:
+            matchLabels:
+              app: sts-mock
+      ports:
+        - port: {{ .Values.mocks.sts.httpPort }}
+          protocol: TCP
+
+    # ── Internal API ──────────────────────────────────────────────────────────
+    - to:
+        - podSelector:
+            matchLabels:
+              app: internal-api-mock
+      ports:
+        - port: {{ .Values.mocks.internalAPI.httpPort }}
+          protocol: TCP
+{{- end }}

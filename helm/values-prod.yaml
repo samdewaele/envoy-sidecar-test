@@ -1,0 +1,22 @@
+# =============================================================================
+# PROD overrides
+# mTLS enforced. Whitelist violations are DROPPED immediately.
+# Tighten CIDRs and CNs to match your real infrastructure.
+# =============================================================================
+
+envoy:
+  mode: prod
+
+podA:
+  inbound:
+    allowedSourceCIDRs:
+      - "10.0.0.0/8"    # replace with your F5 egress CIDR(s)
+    allowedClientCNs:
+      - "test-client"   # replace with the CN your F5/HAProxy presents
+
+podB:
+  inbound:
+    allowedSourceCIDRs:
+      - "10.0.0.0/8"    # replace with Pod A's pod CIDR
+    allowedClientCNs:
+      - "pod-a"         # CN of Pod A's Envoy certificate

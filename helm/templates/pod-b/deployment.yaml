@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pod-b
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: pod-b
+spec:
+  replicas: {{ .Values.podB.replicas }}
+  selector:
+    matchLabels:
+      app: pod-b
+  template:
+    metadata:
+      labels:
+        app: pod-b
+        envoy-mode: {{ .Values.envoy.mode }}
+      annotations:
+        checksum/envoy-config: {{ include "envoy.config.podB" . | sha256sum }}
+    spec:
+      containers:
+        - name: envoy
+          image: {{ .Values.global.imageRegistry }}{{ .Values.envoy.image }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args:
+            - -c
+            - /etc/envoy/envoy.yaml
+            - --log-level
+            - info
+          ports:
+            - name: inbound
+              containerPort: {{ .Values.envoy.ports.inbound }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.envoy.ports.admin }}
+              protocol: TCP
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy
+            - name: envoy-certs
+              mountPath: {{ .Values.envoy.tls.mountPath }}
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: {{ .Values.envoy.ports.admin }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: {{ .Values.envoy.ports.admin }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1337
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+
+        - name: app
+          image: {{ .Values.global.imageRegistry }}{{ .Values.podB.image }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: APP_ROLE
+              value: "pod-b"
+            - name: APP_PORT
+              value: {{ .Values.envoy.ports.appPort | quote }}
+            - name: KAFKA_ADDR
+              value: "localhost:{{ .Values.envoy.ports.outboundKafka }}"
+            - name: STS_ADDR
+              value: "localhost:{{ .Values.envoy.ports.outboundSTS }}"
+            - name: INTERNAL_API_ADDR
+              value: "localhost:{{ .Values.envoy.ports.outboundInternal }}"
+            - name: BLOCKED_ADDR
+              value: "localhost:{{ .Values.envoy.ports.outboundBlocked }}"
+          ports:
+            - name: app
+              containerPort: {{ .Values.envoy.ports.appPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.envoy.ports.appPort }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+
+      volumes:
+        - name: envoy-config
+          configMap:
+            name: envoy-config-pod-b
+        - name: envoy-certs
+          secret:
+            secretName: {{ .Values.envoy.tls.secretName }}

@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pod-a
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: pod-a
+spec:
+  replicas: {{ .Values.podA.replicas }}
+  selector:
+    matchLabels:
+      app: pod-a
+  template:
+    metadata:
+      labels:
+        app: pod-a
+        envoy-mode: {{ .Values.envoy.mode }}
+      annotations:
+        # Forces pod rollout when the Envoy config changes
+        checksum/envoy-config: {{ include "envoy.config.podA" . | sha256sum }}
+    spec:
+      # ── Envoy sidecar ──────────────────────────────────────────────────────
+      containers:
+        - name: envoy
+          image: {{ .Values.global.imageRegistry }}{{ .Values.envoy.image }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args:
+            - -c
+            - /etc/envoy/envoy.yaml
+            - --log-level
+            - info
+          ports:
+            - name: inbound
+              containerPort: {{ .Values.envoy.ports.inbound }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.envoy.ports.admin }}
+              protocol: TCP
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy
+            - name: envoy-certs
+              mountPath: {{ .Values.envoy.tls.mountPath }}
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: {{ .Values.envoy.ports.admin }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: {{ .Values.envoy.ports.admin }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1337    # Envoy conventional UID
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+
+        # ── Application container ─────────────────────────────────────────────
+        - name: app
+          image: {{ .Values.global.imageRegistry }}{{ .Values.podA.image }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: APP_ROLE
+              value: "pod-a"
+            - name: APP_PORT
+              value: {{ .Values.envoy.ports.appPort | quote }}
+            # Outbound upstreams go through Envoy localhost listeners
+            - name: POD_B_ADDR
+              value: "localhost:{{ .Values.envoy.ports.outboundPodB }}"
+            - name: KAFKA_ADDR
+              value: "localhost:{{ .Values.envoy.ports.outboundKafka }}"
+            - name: LLM_ADDR
+              value: "localhost:{{ .Values.envoy.ports.outboundLLM }}"
+            - name: BLOCKED_ADDR
+              value: "localhost:{{ .Values.envoy.ports.outboundBlocked }}"
+          ports:
+            - name: app
+              containerPort: {{ .Values.envoy.ports.appPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.envoy.ports.appPort }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+
+      volumes:
+        - name: envoy-config
+          configMap:
+            name: envoy-config-pod-a
+        - name: envoy-certs
+          secret:
+            secretName: {{ .Values.envoy.tls.secretName }}

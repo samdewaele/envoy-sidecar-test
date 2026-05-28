@@ -1,0 +1,61 @@
+# =============================================================================
+# helmfile.yaml
+#
+# Usage:
+#   helmfile -e dev apply      deploy / upgrade in DEV mode
+#   helmfile -e qa  apply      deploy / upgrade in QA mode
+#   helmfile -e prod apply     deploy / upgrade in PROD mode
+#
+#   helmfile -e qa diff        show what would change
+#   helmfile -e prod destroy   tear down
+#
+# Prerequisites:  helmfile >= 0.162, helm >= 3.13
+# Install:        https://github.com/helmfile/helmfile#installation
+# =============================================================================
+
+repositories: []   # all charts are local
+
+environments:
+  dev:
+    values:
+      - helm/values.yaml
+      - helm/values-dev.yaml
+
+  qa:
+    values:
+      - helm/values.yaml
+      - helm/values-qa.yaml
+
+  prod:
+    values:
+      - helm/values.yaml
+      - helm/values-prod.yaml
+
+---
+releases:
+  - name: envoy-sidecar
+    namespace: envoy-test
+    createNamespace: true
+    chart: ./helm
+
+    # Environment-specific values are already merged above via the
+    # environments block.  We re-state the base file here so helmfile
+    # can track it for drift detection.
+    values:
+      - helm/values.yaml
+      - helm/values-{{ .Environment.Name }}.yaml
+
+    # Image is built locally and pushed to the kind registry.
+    # Set TESTAPP_IMAGE in your shell before running helmfile, or override
+    # with --set on the command line.
+    set:
+      - name: podA.image
+        value: '{{ env "TESTAPP_IMAGE" | default "localhost:5001/testapp:latest" }}'
+      - name: podB.image
+        value: '{{ env "TESTAPP_IMAGE" | default "localhost:5001/testapp:latest" }}'
+      - name: mocks.image
+        value: '{{ env "TESTAPP_IMAGE" | default "localhost:5001/testapp:latest" }}'
+
+    # Wait for all pods to be ready before helmfile considers the release done.
+    wait: true
+    timeout: 120

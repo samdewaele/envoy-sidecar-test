@@ -1,0 +1,32 @@
+{{/*
+Two ConfigMaps — one per pod role.
+The Envoy YAML is fully generated from _helpers.tpl based on .Values.envoy.mode.
+*/}}
+
+# ── Pod A ─────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-config-pod-a
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/part-of: envoy-sidecar-test
+    envoy-role: pod-a
+    envoy-mode: {{ .Values.envoy.mode }}
+data:
+  envoy.yaml: |
+{{ include "envoy.config.podA" . | indent 4 }}
+---
+# ── Pod B ─────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-config-pod-b
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/part-of: envoy-sidecar-test
+    envoy-role: pod-b
+    envoy-mode: {{ .Values.envoy.mode }}
+data:
+  envoy.yaml: |
+{{ include "envoy.config.podB" . | indent 4 }}

@@ -1,0 +1,53 @@
+{{- if .Values.f5Sim.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: f5-sim
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: f5-sim
+spec:
+  replicas: {{ .Values.f5Sim.replicas }}
+  selector:
+    matchLabels:
+      app: f5-sim
+  template:
+    metadata:
+      labels:
+        app: f5-sim
+    spec:
+      containers:
+        - name: nginx
+          image: {{ .Values.global.imageRegistry }}{{ .Values.f5Sim.image }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: https
+              containerPort: 443
+              protocol: TCP
+          volumeMounts:
+            - name: f5-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: f5-certs
+              mountPath: /certs
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: 443
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+      volumes:
+        - name: f5-config
+          configMap:
+            name: f5-sim-config
+        - name: f5-certs
+          secret:
+            secretName: {{ .Values.f5Sim.tls.secretName }}
+{{- end }}

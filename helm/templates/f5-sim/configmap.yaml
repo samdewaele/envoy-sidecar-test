@@ -1,0 +1,64 @@
+{{/*
+f5-sim: nginx simulating the F5 BIG-IP.
+
+Inbound  (from test-client): mTLS — nginx requires a client cert, extracts CN.
+Outbound (to haproxy):       mTLS — nginx presents its own cert to HAProxy.
+
+The CN header is set here and carried through all downstream hops.
+No plain HTTP anywhere.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: f5-sim-config
+  namespace: {{ .Values.global.namespace }}
+data:
+  nginx.conf: |
+    events {
+      worker_connections 1024;
+    }
+
+    http {
+      access_log /dev/stdout;
+      error_log  /dev/stderr warn;
+
+      server {
+        listen 443 ssl;
+        server_name _;
+
+        # ── Downsteam (client → f5-sim): mTLS ─────────────────────────────
+        ssl_certificate        /certs/tls.crt;
+        ssl_certificate_key    /certs/tls.key;
+        ssl_client_certificate /certs/ca.crt;
+        ssl_verify_client      on;
+        ssl_verify_depth       2;
+        ssl_protocols          TLSv1.2 TLSv1.3;
+        ssl_ciphers            HIGH:!aNULL:!MD5;
+
+        location / {
+          # Forward the verified client cert CN downstream — this is what
+          # HAProxy and Pod A Envoy will use for identity checks.
+          proxy_set_header X-SSL-Client-CN   $ssl_client_s_dn_cn;
+          proxy_set_header X-Forwarded-For   $remote_addr;
+          proxy_set_header X-Forwarded-Proto https;
+          proxy_set_header Host              $host;
+
+          # ── Upstream (f5-sim → haproxy): mTLS ───────────────────────────
+          proxy_pass https://haproxy.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.haproxy.port }};
+
+          # f5-sim presents its own cert to HAProxy
+          proxy_ssl_certificate      /certs/tls.crt;
+          proxy_ssl_certificate_key  /certs/tls.key;
+
+          # f5-sim verifies HAProxy's cert against the shared CA
+          proxy_ssl_trusted_certificate /certs/ca.crt;
+          proxy_ssl_verify              on;
+          proxy_ssl_verify_depth        2;
+          proxy_ssl_server_name         on;
+          proxy_ssl_name                haproxy.{{ .Values.global.namespace }}.svc.cluster.local;
+
+          proxy_connect_timeout 5s;
+          proxy_read_timeout    30s;
+        }
+      }
+    }

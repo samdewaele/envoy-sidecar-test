@@ -1,0 +1,21 @@
+{{- if .Values.f5Sim.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: f5-sim
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: f5-sim
+spec:
+  selector:
+    app: f5-sim
+  ports:
+    - name: https
+      port: {{ .Values.f5Sim.service.port }}
+      targetPort: 443
+      {{- if eq .Values.f5Sim.service.type "NodePort" }}
+      nodePort: {{ .Values.f5Sim.service.nodePort }}
+      {{- end }}
+      protocol: TCP
+  type: {{ .Values.f5Sim.service.type }}
+{{- end }}

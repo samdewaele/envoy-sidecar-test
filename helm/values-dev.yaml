@@ -1,0 +1,14 @@
+# =============================================================================
+# DEV overrides
+#
+# mTLS is ON everywhere — transport security is non-negotiable in all modes.
+# The only difference in DEV: Envoy's RBAC filter is not loaded, so the
+# CN / source-CIDR whitelist is not evaluated. All traffic that presents a
+# valid CA-signed cert is accepted and forwarded.
+#
+# Use this to verify the sidecar does not break application traffic before
+# tightening RBAC rules in QA.
+# =============================================================================
+
+envoy:
+  mode: dev

@@ -1,0 +1,231 @@
+{{/*
+All mock targets use the same testapp image in "mock" role.
+Each gets its own Deployment + Service so DNS names match what Envoy clusters reference.
+*/}}
+
+# ── Kafka mock (TCP echo) ─────────────────────────────────────────────────────
+{{- if .Values.mocks.kafka.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-mock
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: kafka-mock
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-mock
+  template:
+    metadata:
+      labels:
+        app: kafka-mock
+    spec:
+      containers:
+        - name: mock
+          image: {{ .Values.global.imageRegistry }}{{ .Values.mocks.image }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: APP_ROLE
+              value: "mock"
+            - name: APP_PORT
+              value: "8080"          # HTTP health endpoint
+            - name: TCP_PORT
+              value: {{ .Values.mocks.kafka.tcpPort | quote }}
+          ports:
+            - containerPort: 8080
+            - containerPort: {{ .Values.mocks.kafka.tcpPort }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+{{- end }}
+
+# ── LLM Gateway mock ──────────────────────────────────────────────────────────
+{{- if .Values.mocks.llmGateway.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-gateway-mock
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: llm-gateway-mock
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-gateway-mock
+  template:
+    metadata:
+      labels:
+        app: llm-gateway-mock
+    spec:
+      containers:
+        - name: mock
+          image: {{ .Values.global.imageRegistry }}{{ .Values.mocks.image }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: APP_ROLE
+              value: "mock"
+            - name: APP_PORT
+              value: {{ .Values.mocks.llmGateway.httpPort | quote }}
+          ports:
+            - containerPort: {{ .Values.mocks.llmGateway.httpPort }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.mocks.llmGateway.httpPort }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+{{- end }}
+
+# ── STS mock ──────────────────────────────────────────────────────────────────
+{{- if .Values.mocks.sts.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sts-mock
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: sts-mock
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sts-mock
+  template:
+    metadata:
+      labels:
+        app: sts-mock
+    spec:
+      containers:
+        - name: mock
+          image: {{ .Values.global.imageRegistry }}{{ .Values.mocks.image }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: APP_ROLE
+              value: "mock"
+            - name: APP_PORT
+              value: {{ .Values.mocks.sts.httpPort | quote }}
+          ports:
+            - containerPort: {{ .Values.mocks.sts.httpPort }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.mocks.sts.httpPort }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+{{- end }}
+
+# ── Internal API mock ─────────────────────────────────────────────────────────
+{{- if .Values.mocks.internalAPI.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: internal-api-mock
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: internal-api-mock
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: internal-api-mock
+  template:
+    metadata:
+      labels:
+        app: internal-api-mock
+    spec:
+      containers:
+        - name: mock
+          image: {{ .Values.global.imageRegistry }}{{ .Values.mocks.image }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: APP_ROLE
+              value: "mock"
+            - name: APP_PORT
+              value: {{ .Values.mocks.internalAPI.httpPort | quote }}
+          ports:
+            - containerPort: {{ .Values.mocks.internalAPI.httpPort }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.mocks.internalAPI.httpPort }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+{{- end }}
+
+# ── Blocked mock (DEV/QA only) ────────────────────────────────────────────────
+{{- if .Values.mocks.blocked.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blocked-mock
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: blocked-mock
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: blocked-mock
+  template:
+    metadata:
+      labels:
+        app: blocked-mock
+    spec:
+      containers:
+        - name: mock
+          image: {{ .Values.global.imageRegistry }}{{ .Values.mocks.image }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: APP_ROLE
+              value: "mock"
+            - name: APP_PORT
+              value: {{ .Values.mocks.blocked.httpPort | quote }}
+          ports:
+            - containerPort: {{ .Values.mocks.blocked.httpPort }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.mocks.blocked.httpPort }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+{{- end }}

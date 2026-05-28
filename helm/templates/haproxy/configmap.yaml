@@ -1,0 +1,46 @@
+{{/*
+HAProxy: re-encrypt tier between f5-sim and Pod A's Envoy.
+
+Inbound  (from f5-sim):      mTLS — HAProxy requires a client cert from f5-sim.
+Outbound (to Pod A Envoy):   mTLS — HAProxy presents its own cert to Envoy.
+
+The X-SSL-Client-CN header set by f5-sim is preserved and forwarded.
+No plain HTTP anywhere.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: haproxy-config
+  namespace: {{ .Values.global.namespace }}
+data:
+  haproxy.cfg: |
+    global
+      log stdout format raw local0 info
+      maxconn 1024
+
+    defaults
+      log     global
+      mode    http
+      option  httplog
+      option  dontlognull
+      option  forwardfor
+      timeout connect 5s
+      timeout client  30s
+      timeout server  30s
+
+    # ── Frontend: mTLS from f5-sim ────────────────────────────────────────────
+    # HAProxy terminates TLS and requires f5-sim to present a valid client cert.
+    frontend ft_from_f5
+      bind *:{{ .Values.haproxy.port }} ssl crt /certs/haproxy.pem ca-file /certs/ca.crt verify required
+      mode http
+      default_backend bk_pod_a
+
+    # ── Backend: mTLS re-encrypt toward Pod A's Envoy ─────────────────────────
+    # HAProxy opens a new TLS connection to Pod A's Envoy and presents its cert.
+    backend bk_pod_a
+      mode http
+      balance roundrobin
+      option  httpchk GET /healthz/ready HTTP/1.1\r\nHost:\ localhost
+      server pod-a \
+        pod-a-service.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.podA.service.port }} \
+        ssl verify required ca-file /certs/ca.crt crt /certs/haproxy.pem
