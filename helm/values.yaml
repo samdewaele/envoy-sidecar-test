@@ -161,6 +161,10 @@ networkPolicy:
 mocks:
   image: ""   # same testapp image, APP_ROLE=mock
 
+  tls:
+    secretName: mock-certs   # contains: tls.crt, tls.key, ca.crt
+    mountPath: /certs
+
   kafka:
     enabled: true
     tcpPort: 9092

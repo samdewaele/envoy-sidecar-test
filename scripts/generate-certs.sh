@@ -81,11 +81,31 @@ issue_cert "pod-a" "pod-a-service.envoy-test.svc.cluster.local" "pod-a"
 # pod-b: Envoy sidecar in Pod B.
 issue_cert "pod-b" "pod-b-service.envoy-test.svc.cluster.local" "pod-b"
 
+# mock-target: shared cert for all mock target pods (kafka, llm-gateway, sts,
+# internal-api, blocked). All their service DNS names are listed as SANs so
+# Envoy's upstream TLS verification passes regardless of which mock it connects to.
+openssl req -newkey rsa:2048 -nodes \
+  -keyout "$OUT/mock.key" \
+  -out    "$OUT/mock.csr" \
+  -subj   "/CN=mock-target/O=TestOrg"
+
+openssl x509 -req -days 825 \
+  -in      "$OUT/mock.csr" \
+  -CA      "$OUT/ca.crt" \
+  -CAkey   "$OUT/ca.key" \
+  -CAcreateserial \
+  -out     "$OUT/mock.crt" \
+  -extfile <(printf "subjectAltName=DNS:mock-target,DNS:kafka-mock,DNS:kafka-mock.envoy-test.svc.cluster.local,DNS:llm-gateway-mock,DNS:llm-gateway-mock.envoy-test.svc.cluster.local,DNS:sts-mock,DNS:sts-mock.envoy-test.svc.cluster.local,DNS:internal-api-mock,DNS:internal-api-mock.envoy-test.svc.cluster.local,DNS:blocked-mock,DNS:blocked-mock.envoy-test.svc.cluster.local,DNS:localhost")
+
+rm "$OUT/mock.csr"
+echo "   issued: CN=mock-target (all mock service SANs)  →  mock.crt"
+
 # HAProxy needs cert+key as a single PEM bundle
 cat "$OUT/haproxy.crt" "$OUT/haproxy.key" > "$OUT/haproxy.pem"
 
 echo ""
 echo "▶  Loading Kubernetes secrets into namespace: $NS"
+
 
 kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS"
 
@@ -127,6 +147,17 @@ kubectl create secret generic client-certs \
   --from-file=ca.crt="$OUT/ca.crt" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# ── mock-certs ────────────────────────────────────────────────────────────────
+# Shared by all mock target pods (kafka-mock, llm-gateway-mock, sts-mock,
+# internal-api-mock, blocked-mock). Envoy verifies this cert against the CA
+# when making outbound TLS connections to those targets.
+kubectl create secret generic mock-certs \
+  --namespace="$NS" \
+  --from-file=tls.crt="$OUT/mock.crt" \
+  --from-file=tls.key="$OUT/mock.key" \
+  --from-file=ca.crt="$OUT/ca.crt" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 echo ""
 echo "✅  Done. Secrets in namespace '$NS':"
-kubectl get secrets -n "$NS" --no-headers | grep -E "f5-sim-certs|haproxy-certs|envoy-certs|client-certs"
+kubectl get secrets -n "$NS" --no-headers | grep -E "f5-sim-certs|haproxy-certs|envoy-certs|client-certs|mock-certs"

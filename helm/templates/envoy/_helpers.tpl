@@ -284,8 +284,8 @@ SHARED: "blocked" outbound listener — tests whitelist-violation behaviour.
 {{/*
 ─────────────────────────────────────────────────────────────────────────────
 SHARED: static cluster
-  tls=true  → mTLS toward another Envoy sidecar
-  tls=false → plain TCP/HTTP toward a mock target
+  tls=true  → mTLS (all inter-pod and Envoy→mock traffic)
+  tls=false → plain (loopback to local app only; never used for network traffic)
 ─────────────────────────────────────────────────────────────────────────────
 */}}
 {{- define "envoy.cluster" -}}
@@ -395,34 +395,29 @@ static_resources:
           "tls"     true
           "Values"  .Values) | indent 4 }}
 
-    # Kafka mock — plain TCP (toy)
+    # Kafka mock — mTLS TCP
     {{ include "envoy.cluster" (dict
           "name"    "kafka"
           "address" .Values.podA.outbound.kafka.address
           "port"    .Values.podA.outbound.kafka.port
-          "tls"     false
+          "tls"     true
           "Values"  .Values) | indent 4 }}
 
-    # LLM Gateway mock — plain HTTP (toy)
+    # LLM Gateway mock — mTLS
     {{ include "envoy.cluster" (dict
           "name"    "llm_gateway"
           "address" .Values.podA.outbound.llmGateway.address
           "port"    .Values.podA.outbound.llmGateway.port
-          "tls"     false
+          "tls"     true
           "Values"  .Values) | indent 4 }}
 
-    - name: blocked_mock
-      type: STRICT_DNS
-      connect_timeout: 5s
-      load_assignment:
-        cluster_name: blocked_mock
-        endpoints:
-          - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address:
-                      address: blocked-mock
-                      port_value: {{ .Values.mocks.blocked.httpPort }}
+    # Blocked mock — mTLS (DEV/QA only; PROD never reaches this cluster)
+    {{ include "envoy.cluster" (dict
+          "name"    "blocked_mock"
+          "address" "blocked-mock"
+          "port"    .Values.mocks.blocked.httpPort
+          "tls"     true
+          "Values"  .Values) | indent 4 }}
 {{- end }}
 
 
@@ -511,33 +506,28 @@ static_resources:
           "name"    "kafka"
           "address" .Values.podB.outbound.kafka.address
           "port"    .Values.podB.outbound.kafka.port
-          "tls"     false
+          "tls"     true
           "Values"  .Values) | indent 4 }}
 
     {{ include "envoy.cluster" (dict
           "name"    "sts"
           "address" .Values.podB.outbound.sts.address
           "port"    .Values.podB.outbound.sts.port
-          "tls"     false
+          "tls"     true
           "Values"  .Values) | indent 4 }}
 
     {{ include "envoy.cluster" (dict
           "name"    "internal_api"
           "address" .Values.podB.outbound.internalAPI.address
           "port"    .Values.podB.outbound.internalAPI.port
-          "tls"     false
+          "tls"     true
           "Values"  .Values) | indent 4 }}
 
-    - name: blocked_mock
-      type: STRICT_DNS
-      connect_timeout: 5s
-      load_assignment:
-        cluster_name: blocked_mock
-        endpoints:
-          - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address:
-                      address: blocked-mock
-                      port_value: {{ .Values.mocks.blocked.httpPort }}
+    # Blocked mock — mTLS (DEV/QA only; PROD never reaches this cluster)
+    {{ include "envoy.cluster" (dict
+          "name"    "blocked_mock"
+          "address" "blocked-mock"
+          "port"    .Values.mocks.blocked.httpPort
+          "tls"     true
+          "Values"  .Values) | indent 4 }}
 {{- end }}
