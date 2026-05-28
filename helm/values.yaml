@@ -11,6 +11,13 @@ global:
   imageRegistry: ""          # prefix for all images, e.g. "registry.mybank.internal/"
   imagePullPolicy: IfNotPresent
 
+  # Container UIDs.
+  # Set to ~ (null) on OpenShift when the restricted SCC is active — it
+  # assigns UIDs from the namespace range and rejects a fixed runAsUser.
+  # runAsNonRoot: true is always enforced regardless of this setting.
+  envoyUID: 1337    # conventional Envoy UID; ignored on OpenShift
+  appUID:   65534   # nobody; ignored on OpenShift
+
 # ---------------------------------------------------------------------------
 # Envoy sidecar — shared settings
 # ---------------------------------------------------------------------------

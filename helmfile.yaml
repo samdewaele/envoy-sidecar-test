@@ -1,13 +1,18 @@
 # =============================================================================
 # helmfile.yaml
 #
-# Usage:
-#   helmfile -e dev apply      deploy / upgrade in DEV mode
-#   helmfile -e qa  apply      deploy / upgrade in QA mode
-#   helmfile -e prod apply     deploy / upgrade in PROD mode
+# Kind (local) environments — include the toy f5-sim + haproxy simulation:
+#   helmfile -e dev apply
+#   helmfile -e qa  apply
+#   helmfile -e prod apply
 #
-#   helmfile -e qa diff        show what would change
-#   helmfile -e prod destroy   tear down
+# OpenShift environments — f5-sim/haproxy disabled, UIDs omitted for SCC:
+#   helmfile -e openshift-dev   apply
+#   helmfile -e openshift-qa    apply
+#   helmfile -e openshift-prod  apply
+#
+#   helmfile -e openshift-qa diff      show what would change
+#   helmfile -e openshift-prod destroy tear down
 #
 # Prerequisites:  helmfile >= 0.162, helm >= 3.13
 # Install:        https://github.com/helmfile/helmfile#installation
@@ -16,6 +21,7 @@
 repositories: []   # all charts are local
 
 environments:
+  # ── Kind / local ────────────────────────────────────────────────────────────
   dev:
     values:
       - helm/values.yaml
@@ -31,6 +37,27 @@ environments:
       - helm/values.yaml
       - helm/values-prod.yaml
 
+  # ── OpenShift ────────────────────────────────────────────────────────────────
+  # values-openshift.yaml disables f5-sim/haproxy and nulls out the fixed UIDs.
+  # The mode overlay (dev/qa/prod) is still layered on top for RBAC behaviour.
+  openshift-dev:
+    values:
+      - helm/values.yaml
+      - helm/values-openshift.yaml
+      - helm/values-dev.yaml
+
+  openshift-qa:
+    values:
+      - helm/values.yaml
+      - helm/values-openshift.yaml
+      - helm/values-qa.yaml
+
+  openshift-prod:
+    values:
+      - helm/values.yaml
+      - helm/values-openshift.yaml
+      - helm/values-prod.yaml
+
 ---
 releases:
   - name: envoy-sidecar
@@ -41,9 +68,10 @@ releases:
     # Environment-specific values are already merged above via the
     # environments block.  We re-state the base file here so helmfile
     # can track it for drift detection.
+    # For openshift-* environments the overlay files are listed explicitly
+    # in the environments block above; the base file is enough here.
     values:
       - helm/values.yaml
-      - helm/values-{{ .Environment.Name }}.yaml
 
     # Image is built locally and pushed to the kind registry.
     # Set TESTAPP_IMAGE in your shell before running helmfile, or override

@@ -28,7 +28,9 @@ Envoy's outbound clusters connect to them over mTLS.
 {{- define "mock.securityContext" -}}
 securityContext:
   runAsNonRoot: true
-  runAsUser: 65534
+  {{- if .Values.global.appUID }}
+  runAsUser: {{ .Values.global.appUID }}
+  {{- end }}
   allowPrivilegeEscalation: false
   capabilities:
     drop: ["ALL"]

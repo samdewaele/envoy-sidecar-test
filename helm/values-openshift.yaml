@@ -1,0 +1,31 @@
+# =============================================================================
+# values-openshift.yaml — OpenShift overlay
+#
+# Layer this on top of a mode overlay when deploying to OpenShift:
+#
+#   helmfile -e openshift-dev   apply
+#   helmfile -e openshift-qa    apply
+#   helmfile -e openshift-prod  apply
+#
+# What this overlay does:
+#   1. Drops fixed runAsUser UIDs so OpenShift's restricted SCC can assign
+#      UIDs from the namespace's allocated range.  runAsNonRoot: true is
+#      still enforced by the templates regardless.
+#   2. Disables the f5-sim and haproxy simulation components — the real
+#      F5 → HAProxy tier is already in place in the cluster.
+# =============================================================================
+
+global:
+  # ~ = null: omit runAsUser entirely and let OpenShift assign the UID.
+  # If your cluster uses a custom SCC that allows specific UIDs, set these
+  # back to 1337 / 65534 (or whatever your SCC permits).
+  envoyUID: ~
+  appUID:   ~
+
+# The real F5 → HAProxy tier handles TLS termination and CN forwarding.
+# These toy simulation components are not needed on OpenShift.
+f5Sim:
+  enabled: false
+
+haproxy:
+  enabled: false
