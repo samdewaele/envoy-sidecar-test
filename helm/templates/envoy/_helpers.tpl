@@ -147,6 +147,44 @@ SHARED: HTTP RBAC filter — mode-driven, never removes mTLS.
 
 {{/*
 ─────────────────────────────────────────────────────────────────────────────
+SHARED: JWT injector Lua filter — inserted into every INBOUND HCM filter chain.
+
+Reads a pre-signed RS256 JWT from the file mounted from envoy-jwt-token secret
+and injects it as a request header (default: X-Envoy-Internal-JWT).
+The app container validates the JWT with the public key from app-jwt-pubkey
+secret.  The private key is NEVER mounted into the app container.
+
+When jwt.enabled is false the template emits nothing and the app skips
+validation (JWT_PUBKEY_FILE env var will not be set).
+─────────────────────────────────────────────────────────────────────────────
+*/}}
+{{- define "envoy.jwtInjectorFilter" -}}
+{{- if .Values.envoy.jwt.enabled -}}
+- name: envoy.filters.http.lua
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+    inline_code: |
+      -- Token is loaded lazily once per worker thread and then cached.
+      local _jwt_token = nil
+      function envoy_on_request(request_handle)
+        if _jwt_token == nil then
+          local f = io.open("{{ .Values.envoy.jwt.tokenMountPath }}/jwt.token", "r")
+          if f then
+            _jwt_token = f:read("*l") or ""
+            f:close()
+          else
+            _jwt_token = ""
+          end
+        end
+        if _jwt_token ~= "" then
+          request_handle:headers():replace("{{ .Values.envoy.jwt.headerName }}", "Bearer " .. _jwt_token)
+        end
+      end
+{{- end -}}
+{{- end }}
+
+{{/*
+─────────────────────────────────────────────────────────────────────────────
 SHARED: outbound TCP-proxy listener (plain TCP, e.g. Kafka mock)
 ─────────────────────────────────────────────────────────────────────────────
 */}}
@@ -348,6 +386,7 @@ static_resources:
                         "allowedCNs"   .Values.podA.inbound.allowedClientCNs
                         "allowedCIDRs" .Values.podA.inbound.allowedSourceCIDRs
                         "cnHeader"     .Values.podA.inbound.cnHeader) | indent 18 }}
+                  {{- include "envoy.jwtInjectorFilter" . | indent 18 }}
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
@@ -463,6 +502,7 @@ static_resources:
                         "allowedCNs"   .Values.podB.inbound.allowedClientCNs
                         "allowedCIDRs" .Values.podB.inbound.allowedSourceCIDRs
                         "cnHeader"     .Values.podB.inbound.cnHeader) | indent 18 }}
+                  {{- include "envoy.jwtInjectorFilter" . | indent 18 }}
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router

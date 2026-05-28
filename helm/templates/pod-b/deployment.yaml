@@ -40,6 +40,11 @@ spec:
             - name: envoy-certs
               mountPath: {{ .Values.envoy.tls.mountPath }}
               readOnly: true
+            {{- if .Values.envoy.jwt.enabled }}
+            - name: envoy-jwt-token
+              mountPath: {{ .Values.envoy.jwt.tokenMountPath }}
+              readOnly: true
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /ready
@@ -83,10 +88,22 @@ spec:
               value: "localhost:{{ .Values.envoy.ports.outboundInternal }}"
             - name: BLOCKED_ADDR
               value: "localhost:{{ .Values.envoy.ports.outboundBlocked }}"
+            {{- if .Values.envoy.jwt.enabled }}
+            - name: JWT_PUBKEY_FILE
+              value: {{ .Values.envoy.jwt.pubkeyMountPath }}/jwt.pub
+            - name: JWT_HEADER
+              value: {{ .Values.envoy.jwt.headerName }}
+            {{- end }}
           ports:
             - name: app
               containerPort: {{ .Values.envoy.ports.appPort }}
               protocol: TCP
+          {{- if .Values.envoy.jwt.enabled }}
+          volumeMounts:
+            - name: app-jwt-pubkey
+              mountPath: {{ .Values.envoy.jwt.pubkeyMountPath }}
+              readOnly: true
+          {{- end }}
           readinessProbe:
             exec:
               command:
@@ -117,3 +134,11 @@ spec:
         - name: envoy-certs
           secret:
             secretName: {{ .Values.envoy.tls.secretName }}
+        {{- if .Values.envoy.jwt.enabled }}
+        - name: envoy-jwt-token
+          secret:
+            secretName: {{ .Values.envoy.jwt.tokenSecretName }}
+        - name: app-jwt-pubkey
+          secret:
+            secretName: {{ .Values.envoy.jwt.pubkeySecretName }}
+        {{- end }}

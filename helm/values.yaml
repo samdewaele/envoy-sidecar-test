@@ -40,6 +40,18 @@ envoy:
     secretName: envoy-certs   # must contain: tls.crt, tls.key, ca.crt
     mountPath: /certs
 
+  # JWT injection — Envoy signs every inbound request with an RS256 JWT so the
+  # app container can verify the request really came through the sidecar.
+  # Private key (for signing) lives ONLY in the Envoy container.
+  # Public key (for verification) lives ONLY in the app container.
+  jwt:
+    enabled: true
+    tokenSecretName: envoy-jwt-token   # k8s Secret with jwt.token — mounted in Envoy
+    pubkeySecretName: app-jwt-pubkey   # k8s Secret with jwt.pub  — mounted in app
+    tokenMountPath: /jwt               # Envoy reads /jwt/jwt.token
+    pubkeyMountPath: /jwt-pubkey       # App reads  /jwt-pubkey/jwt.pub
+    headerName: X-Envoy-Internal-JWT   # header Envoy sets; app validates this
+
   accessLogFormat: >
     [%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%
     %PROTOCOL%" %RESPONSE_CODE% %RESPONSE_FLAGS%

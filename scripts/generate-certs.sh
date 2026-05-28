@@ -158,6 +158,51 @@ kubectl create secret generic mock-certs \
   --from-file=ca.crt="$OUT/ca.crt" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# ── JWT RS256 keypair + pre-signed token ──────────────────────────────────────
+#
+# Private key → mounted ONLY in the Envoy sidecar (envoy-jwt-token secret).
+# Public  key → mounted ONLY in the app container  (app-jwt-pubkey  secret).
+#
+# The Lua filter in Envoy reads the token from /jwt/jwt.token and injects it
+# as the X-Envoy-Internal-JWT request header.  The app validates it with the
+# public key.  No external JWT library is required on either side.
+echo ""
+echo "▶  Generating JWT RS256 keypair"
+
+openssl genrsa -out "$OUT/jwt.key" 2048 2>/dev/null
+openssl rsa    -in  "$OUT/jwt.key" -pubout -out "$OUT/jwt.pub" 2>/dev/null
+echo "   RSA keypair: jwt.key / jwt.pub"
+
+echo "▶  Minting RS256 JWT token"
+
+# base64url-encode stdin (no padding, no line-wraps)
+b64url() { openssl base64 -e -A | tr '+/' '-_' | tr -d '='; }
+
+HDR=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | b64url)
+# Expiry: now + 100 years (effectively permanent for this test environment)
+EXP=$(( $(date +%s) + 3153600000 ))
+PAY=$(printf '%s' "{\"iss\":\"envoy-sidecar\",\"sub\":\"envoy-internal\",\"exp\":${EXP}}" | b64url)
+SIG=$(printf '%s' "${HDR}.${PAY}" | openssl dgst -sha256 -sign "$OUT/jwt.key" -binary | b64url)
+TOKEN="${HDR}.${PAY}.${SIG}"
+printf '%s' "$TOKEN" > "$OUT/jwt.token"
+echo "   JWT token written to $OUT/jwt.token  (exp epoch: ${EXP})"
+
+# ── envoy-jwt-token secret ─────────────────────────────────────────────────
+# Mounted read-only into the Envoy sidecar at /jwt.
+# The Lua filter reads /jwt/jwt.token and injects it as a Bearer header.
+kubectl create secret generic envoy-jwt-token \
+  --namespace="$NS" \
+  --from-file=jwt.token="$OUT/jwt.token" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# ── app-jwt-pubkey secret ─────────────────────────────────────────────────
+# Mounted read-only into the app container at /jwt-pubkey.
+# The app validates JWT signatures with /jwt-pubkey/jwt.pub.
+kubectl create secret generic app-jwt-pubkey \
+  --namespace="$NS" \
+  --from-file=jwt.pub="$OUT/jwt.pub" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 echo ""
 echo "✅  Done. Secrets in namespace '$NS':"
-kubectl get secrets -n "$NS" --no-headers | grep -E "f5-sim-certs|haproxy-certs|envoy-certs|client-certs|mock-certs"
+kubectl get secrets -n "$NS" --no-headers | grep -E "f5-sim-certs|haproxy-certs|envoy-certs|client-certs|mock-certs|envoy-jwt-token|app-jwt-pubkey"

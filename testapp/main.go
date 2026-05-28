@@ -1,8 +1,14 @@
 package main
 
 import (
+	"crypto"
+	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +19,10 @@ import (
 	"time"
 )
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -20,58 +30,67 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-// loadTLSConfig builds a *tls.Config from TLS_CERT / TLS_KEY / TLS_CA env vars.
-// Returns nil if the env vars are not set (plain mode — should not happen in
-// this stack, but keeps the binary usable standalone).
-// When TLS_CA is set, mutual TLS is required: the peer must present a cert
-// signed by that CA.
-func loadTLSConfig() *tls.Config {
+// ─────────────────────────────────────────────────────────────────────────────
+// TLS — server + client configs
+// ─────────────────────────────────────────────────────────────────────────────
+
+// loadServerTLS builds a *tls.Config for serving (inbound connections).
+// When TLS_CA is set, mutual TLS is enforced: the peer must present a cert.
+// Returns nil if TLS_CERT / TLS_KEY are not set.
+func loadServerTLS() *tls.Config {
 	certFile := getenv("TLS_CERT", "")
 	keyFile := getenv("TLS_KEY", "")
 	caFile := getenv("TLS_CA", "")
-
 	if certFile == "" || keyFile == "" {
 		return nil
 	}
-
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		log.Fatalf("TLS: failed to load cert/key (%s / %s): %v", certFile, keyFile, err)
+		log.Fatalf("TLS: failed to load cert/key: %v", err)
 	}
-
-	cfg := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-	}
-
+	cfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	if caFile != "" {
-		caPEM, err := os.ReadFile(caFile)
-		if err != nil {
-			log.Fatalf("TLS: failed to read CA %s: %v", caFile, err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caPEM) {
-			log.Fatalf("TLS: failed to parse CA %s", caFile)
-		}
-		// Require the connecting peer to present a CA-signed cert (mTLS).
-		cfg.ClientCAs = caPEM // saved for TCP server below
+		pool := mustLoadCertPool(caFile)
+		cfg.ClientCAs = pool
 		cfg.ClientAuth = tls.RequireAndVerifyClientCert
-		cfg.ClientCAs = nil // reset; set properly below
-		cfg.RootCAs = pool  // used when this binary is the client (outbound)
-		// For server mode:
-		serverCfg := cfg.Clone()
-		serverCfg.ClientCAs = pool
-		serverCfg.ClientAuth = tls.RequireAndVerifyClientCert
-		return serverCfg
 	}
-
 	return cfg
 }
 
-// listenAndServe starts an HTTP(S) server.
-// IMPORTANT: always binds to 127.0.0.1 (loopback only).
-// The app must never be reachable directly from the pod network — all
-// inbound traffic must arrive through the Envoy sidecar on port 8443.
+// buildClientTLS builds a *tls.Config for outbound connections.
+// Returns nil if the env vars are not set.
+func buildClientTLS() *tls.Config {
+	certFile := getenv("TLS_CERT", "")
+	keyFile := getenv("TLS_KEY", "")
+	caFile := getenv("TLS_CA", "")
+	if certFile == "" || keyFile == "" || caFile == "" {
+		return nil
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		log.Fatalf("TLS client: failed to load cert/key: %v", err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      mustLoadCertPool(caFile),
+		MinVersion:   tls.VersionTLS12,
+	}
+}
+
+func mustLoadCertPool(caFile string) *x509.CertPool {
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		log.Fatalf("TLS: failed to read CA %s: %v", caFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		log.Fatalf("TLS: failed to parse CA %s", caFile)
+	}
+	return pool
+}
+
+// listenAndServe always binds to 127.0.0.1 — the app must never be reachable
+// directly from the pod network. All inbound traffic arrives through Envoy.
 func listenAndServe(port string, handler http.Handler, tlsCfg *tls.Config) error {
 	addr := "127.0.0.1:" + port
 	if tlsCfg != nil {
@@ -86,7 +105,103 @@ func listenAndServe(port string, handler http.Handler, tlsCfg *tls.Config) error
 	return http.ListenAndServe(addr, handler)
 }
 
-// callHTTP performs a GET, optionally with a client cert for mTLS.
+// ─────────────────────────────────────────────────────────────────────────────
+// JWT validation (RS256, stdlib only — no external dependencies)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type jwtClaims struct {
+	Iss string `json:"iss"`
+	Aud string `json:"aud"`
+	Exp int64  `json:"exp"`
+	Iat int64  `json:"iat"`
+}
+
+// loadRSAPublicKey reads an RSA public key from a PEM file.
+func loadRSAPublicKey(path string) *rsa.PublicKey {
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatalf("JWT: cannot read public key %s: %v", path, err)
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		log.Fatalf("JWT: failed to decode PEM from %s", path)
+	}
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		log.Fatalf("JWT: cannot parse public key %s: %v", path, err)
+	}
+	rsaPub, ok := pub.(*rsa.PublicKey)
+	if !ok {
+		log.Fatalf("JWT: key in %s is not RSA", path)
+	}
+	log.Printf("JWT: loaded public key from %s", path)
+	return rsaPub
+}
+
+// validateRS256JWT verifies the signature, expiry, and issuer of a JWT.
+func validateRS256JWT(tokenStr string, pub *rsa.PublicKey) error {
+	parts := strings.SplitN(tokenStr, ".", 3)
+	if len(parts) != 3 {
+		return fmt.Errorf("malformed token (expected 3 parts, got %d)", len(parts))
+	}
+
+	// Verify RS256 signature over header.payload
+	message := parts[0] + "." + parts[1]
+	h := sha256.Sum256([]byte(message))
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return fmt.Errorf("bad signature encoding: %w", err)
+	}
+	if err := rsa.VerifyPKCS1v15(pub, crypto.SHA256, h[:], sig); err != nil {
+		return fmt.Errorf("signature invalid: %w", err)
+	}
+
+	// Decode and validate claims
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return fmt.Errorf("bad payload encoding: %w", err)
+	}
+	var claims jwtClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return fmt.Errorf("bad payload JSON: %w", err)
+	}
+	if claims.Iss != "envoy-sidecar" {
+		return fmt.Errorf("unexpected issuer %q", claims.Iss)
+	}
+	if time.Now().Unix() > claims.Exp {
+		return fmt.Errorf("token expired at %d (now %d)", claims.Exp, time.Now().Unix())
+	}
+	return nil
+}
+
+// jwtMiddleware validates the X-Envoy-Internal-JWT header on every request.
+// The /health path is exempt so readiness probes work without a token.
+func jwtMiddleware(pub *rsa.PublicKey, headerName string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		raw := r.Header.Get(headerName)
+		if raw == "" {
+			log.Printf("JWT: missing header %q on %s %s from %s", headerName, r.Method, r.URL.Path, r.RemoteAddr)
+			http.Error(w, "missing internal auth header", http.StatusUnauthorized)
+			return
+		}
+		token := strings.TrimPrefix(raw, "Bearer ")
+		if err := validateRS256JWT(token, pub); err != nil {
+			log.Printf("JWT: invalid token on %s %s: %v", r.Method, r.URL.Path, err)
+			http.Error(w, "invalid internal auth", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Outbound helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
 func callHTTP(label, url string, tlsCfg *tls.Config) string {
 	transport := &http.Transport{}
 	if tlsCfg != nil {
@@ -102,15 +217,11 @@ func callHTTP(label, url string, tlsCfg *tls.Config) string {
 	return fmt.Sprintf("%-22s → HTTP %d: %s", label, resp.StatusCode, strings.TrimSpace(string(body)))
 }
 
-// callTCP opens a TLS TCP connection, writes a ping, reads a line.
 func callTCP(label, addr string, tlsCfg *tls.Config) string {
 	var conn net.Conn
 	var err error
 	if tlsCfg != nil {
-		conn, err = tls.DialWithDialer(
-			&net.Dialer{Timeout: 5 * time.Second},
-			"tcp", addr, tlsCfg,
-		)
+		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, tlsCfg)
 	} else {
 		conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
 	}
@@ -125,8 +236,10 @@ func callTCP(label, addr string, tlsCfg *tls.Config) string {
 	return fmt.Sprintf("%-22s → TCP OK, got: %q", label, strings.TrimSpace(string(buf[:n])))
 }
 
-// echoHandler returns the request method, path, remote addr, and all headers.
-// Useful for verifying that X-SSL-Client-CN arrives end-to-end.
+// ─────────────────────────────────────────────────────────────────────────────
+// Echo handler — shows all headers including the injected JWT header
+// ─────────────────────────────────────────────────────────────────────────────
+
 func echoHandler(role string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -136,40 +249,17 @@ func echoHandler(role string) http.HandlerFunc {
 		fmt.Fprintf(w, "Remote : %s\n\n", r.RemoteAddr)
 		fmt.Fprintln(w, "Headers:")
 		for k, vs := range r.Header {
-			fmt.Fprintf(w, "  %-30s %s\n", k+":", strings.Join(vs, ", "))
+			fmt.Fprintf(w, "  %-35s %s\n", k+":", strings.Join(vs, ", "))
 		}
-		// Show mTLS peer CN if the connection carried a client cert.
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-			fmt.Fprintf(w, "\nPeer cert CN : %s\n", r.TLS.PeerCertificates[0].Subject.CommonName)
+			fmt.Fprintf(w, "\nPeer cert CN: %s\n", r.TLS.PeerCertificates[0].Subject.CommonName)
 		}
 	}
 }
 
-// buildClientTLS builds a *tls.Config suitable for outbound HTTP/TCP calls
-// (presents the app's own cert + verifies the server against the CA).
-func buildClientTLS() *tls.Config {
-	certFile := getenv("TLS_CERT", "")
-	keyFile := getenv("TLS_KEY", "")
-	caFile := getenv("TLS_CA", "")
-	if certFile == "" || keyFile == "" || caFile == "" {
-		return nil
-	}
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		log.Fatalf("TLS: client cert load error: %v", err)
-	}
-	caPEM, err := os.ReadFile(caFile)
-	if err != nil {
-		log.Fatalf("TLS: CA read error: %v", err)
-	}
-	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM(caPEM)
-	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		RootCAs:      pool,
-		MinVersion:   tls.VersionTLS12,
-	}
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Role registrations
+// ─────────────────────────────────────────────────────────────────────────────
 
 func registerPodA(mux *http.ServeMux, clientTLS *tls.Config) {
 	podBAddr := getenv("POD_B_ADDR", "localhost:19080")
@@ -191,8 +281,6 @@ func registerPodA(mux *http.ServeMux, clientTLS *tls.Config) {
 	mux.HandleFunc("/call-llm", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, callHTTP("pod-a→llm-gateway", scheme+"://"+llmAddr+"/echo", clientTLS))
 	})
-	// /call-blocked: hits the Envoy "forbidden" listener.
-	// DEV → passes through; QA → logged; PROD → connection reset.
 	mux.HandleFunc("/call-blocked", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, callHTTP("pod-a→BLOCKED", scheme+"://"+blockedAddr+"/echo", clientTLS))
 	})
@@ -239,7 +327,10 @@ func registerPodB(mux *http.ServeMux, clientTLS *tls.Config) {
 	})
 }
 
-// runTCPMock starts a TLS (or plain) TCP echo server for the Kafka mock.
+// ─────────────────────────────────────────────────────────────────────────────
+// TCP mock (Kafka simulation)
+// ─────────────────────────────────────────────────────────────────────────────
+
 func runTCPMock(tcpPort string, tlsCfg *tls.Config) {
 	go func() {
 		addr := "127.0.0.1:" + tcpPort
@@ -271,14 +362,16 @@ func runTCPMock(tcpPort string, tlsCfg *tls.Config) {
 	}()
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// main
+// ─────────────────────────────────────────────────────────────────────────────
+
 func main() {
 	role := getenv("APP_ROLE", "pod-a")
 	port := getenv("APP_PORT", "9090")
 	tcpPort := getenv("TCP_PORT", "")
 
-	// Server TLS config (for inbound connections to this binary)
-	serverTLS := loadTLSConfig()
-	// Client TLS config (for outbound calls this binary makes)
+	serverTLS := loadServerTLS()
 	clientTLS := buildClientTLS()
 
 	mux := http.NewServeMux()
@@ -300,8 +393,24 @@ func main() {
 		}
 	}
 
+	// ── JWT validation middleware ─────────────────────────────────────────────
+	// Wrap the mux if a public key is configured.
+	// The public key is mounted into the app container from the app-jwt-pubkey
+	// secret. The private key (used by Envoy to sign tokens) is NEVER mounted
+	// into the app container — only the Envoy sidecar has it.
+	var handler http.Handler = mux
+	jwtPubkeyFile := getenv("JWT_PUBKEY_FILE", "")
+	if jwtPubkeyFile != "" {
+		pub := loadRSAPublicKey(jwtPubkeyFile)
+		jwtHeader := getenv("JWT_HEADER", "x-envoy-internal-jwt")
+		handler = jwtMiddleware(pub, jwtHeader, mux)
+		log.Printf("JWT validation ENABLED (header: %s)", jwtHeader)
+	} else {
+		log.Printf("JWT validation DISABLED (JWT_PUBKEY_FILE not set)")
+	}
+
 	log.Printf("testapp starting  role=%s  port=%s  tls=%v", role, port, serverTLS != nil)
-	if err := listenAndServe(port, mux, serverTLS); err != nil {
+	if err := listenAndServe(port, handler, serverTLS); err != nil {
 		log.Fatal(err)
 	}
 }
