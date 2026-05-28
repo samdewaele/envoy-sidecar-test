@@ -6,6 +6,26 @@ Kubernetes pods — before the sidecar is integrated into the production applica
 
 ---
 
+## Where to run this
+
+**Everything runs on your local machine — no cloud account, no VM, no remote cluster.**
+
+`make cluster` creates a Kubernetes cluster inside Docker using [Kind](https://kind.sigs.k8s.io/).  
+The registry, cluster, and all pods live in Docker containers on your machine.  
+`make down` removes everything when you're done.
+
+| OS | Works? | Notes |
+|---|---|---|
+| Linux | ✅ | Native. All tools install normally. |
+| macOS | ✅ | Use Homebrew for `kind`, `helm`, `helmfile`. Docker Desktop or Colima. |
+| Windows | ⚠️ | **Use WSL2.** The Makefile and cert scripts require bash. Run everything from a WSL2 terminal, with Docker Desktop's WSL2 backend enabled. Do not use Git Bash or PowerShell. |
+
+**Docker must be running** before any `make` command.  
+On Linux/macOS, `docker ps` should return without error.  
+On Windows, Docker Desktop must be open and the WSL2 integration enabled for your distro.
+
+---
+
 ## Prerequisites
 
 | Tool | Version | Install |
