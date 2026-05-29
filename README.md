@@ -28,14 +28,61 @@ On Windows, Docker Desktop must be open and the WSL2 integration enabled for you
 
 ## Prerequisites
 
-| Tool | Version | Install |
-|---|---|---|
-| `kind` | ≥ 0.23 | https://kind.sigs.k8s.io/docs/user/quick-start/ |
-| `kubectl` | ≥ 1.29 | https://kubernetes.io/docs/tasks/tools/ |
-| `helm` | ≥ 3.13 | https://helm.sh/docs/intro/install/ |
-| `helmfile` | ≥ 0.162 | https://github.com/helmfile/helmfile#installation |
-| `docker` | ≥ 25 | https://docs.docker.com/get-docker/ |
-| `openssl` | any | usually pre-installed |
+### Linux (native)
+
+```bash
+# openssl — standard apt
+sudo apt install openssl
+
+# kubectl — needs the Kubernetes apt repo (not in default Ubuntu repos)
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] \
+https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /" \
+  | sudo tee /etc/apt/sources.list.d/kubernetes.list
+sudo apt update && sudo apt install kubectl
+
+# helm — official install script
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# kind — binary release (not in apt)
+curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
+chmod +x /tmp/kind && sudo mv /tmp/kind /usr/local/bin/kind
+
+# helmfile — binary release (not in apt)
+curl -fsSLo /tmp/helmfile.tar.gz \
+  https://github.com/helmfile/helmfile/releases/download/v0.162.0/helmfile_0.162.0_linux_amd64.tar.gz
+tar -xzf /tmp/helmfile.tar.gz -C /tmp helmfile
+sudo mv /tmp/helmfile /usr/local/bin/helmfile
+
+# docker — Docker Engine via Docker's apt repo
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER   # log out and back in after this
+```
+
+### Windows (WSL2)
+
+> ⚠️ **`sudo apt install kind helm kubectl helmfile docker` will fail** — none of these are in the standard Ubuntu apt repository. Use the steps below.
+
+**Step 1 — Docker**: Install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/).  
+After installing, go to **Settings → Resources → WSL Integration** and enable it for your distro.  
+Restart WSL. The `docker` command now works inside WSL2 without any `apt install`.
+
+**Step 2 — Everything else**: run the install script from inside your WSL2 terminal:
+
+```bash
+chmod +x scripts/install-tools-wsl2.sh
+./scripts/install-tools-wsl2.sh
+```
+
+The script installs `kubectl`, `helm`, `kind`, `helmfile`, and `openssl` using their official binary releases and apt repos. It skips Docker (handled by Docker Desktop above).
+
+### macOS
+
+```bash
+brew install kind kubectl helm helmfile openssl
+```
 
 ---
 
