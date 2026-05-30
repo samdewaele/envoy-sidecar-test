@@ -24,9 +24,9 @@ BIN=/usr/local/bin
 echo "▶  Updating apt"
 sudo apt-get update -q
 
-# ── openssl ───────────────────────────────────────────────────────────────────
-echo "▶  Installing openssl"
-sudo apt-get install -y -q openssl curl ca-certificates gnupg
+# ── base tools ────────────────────────────────────────────────────────────────
+echo "▶  Installing base tools (make, git, openssl, curl)"
+sudo apt-get install -y -q make git openssl curl ca-certificates gnupg
 
 # ── kubectl ───────────────────────────────────────────────────────────────────
 # Not in the default Ubuntu repo — needs Kubernetes' own apt source.

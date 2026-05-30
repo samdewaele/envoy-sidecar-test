@@ -6,33 +6,137 @@ Kubernetes pods — before the sidecar is integrated into the production applica
 
 ---
 
-## Where to run this
+## Setup
 
-**Everything runs on your local machine — no cloud account, no VM, no remote cluster.**
-
+**Everything runs on your local machine — no cloud account, no VM, no remote cluster.**  
 `make cluster` creates a Kubernetes cluster inside Docker using [Kind](https://kind.sigs.k8s.io/).  
-The registry, cluster, and all pods live in Docker containers on your machine.  
-`make down` removes everything when you're done.
+The registry, cluster, and all pods are Docker containers on your machine. `make down` cleans everything up.
 
-| OS | Works? | Notes |
-|---|---|---|
-| Linux | ✅ | Native. All tools install normally. |
-| macOS | ✅ | Use Homebrew for `kind`, `helm`, `helmfile`. Docker Desktop or Colima. |
-| Windows | ⚠️ | **Use WSL2.** The Makefile and cert scripts require bash. Run everything from a WSL2 terminal, with Docker Desktop's WSL2 backend enabled. Do not use Git Bash or PowerShell. |
-
-**Docker must be running** before any `make` command.  
-On Linux/macOS, `docker ps` should return without error.  
-On Windows, Docker Desktop must be open and the WSL2 integration enabled for your distro.
+Pick your OS below and follow the steps in order.
 
 ---
 
-## Prerequisites
+### Windows
+
+> **Do not use Git Bash or PowerShell.** The Makefile and cert scripts require bash.  
+> Everything below is done inside a **WSL2 terminal** (Ubuntu running inside Windows).
+
+#### Step 1 — Install WSL2
+
+Open **PowerShell as Administrator** (right-click the Start menu → "Windows PowerShell (Admin)") and run:
+
+```powershell
+wsl --install
+```
+
+This installs WSL2 with Ubuntu. **Restart your computer when prompted.**
+
+After rebooting, Ubuntu will launch automatically and ask you to create a username and password. Do that — this is your Linux account inside Windows.
+
+> If you already have WSL but an older version, run `wsl --update` and `wsl --set-default-version 2`.
+
+#### Step 2 — Open a WSL2 terminal
+
+You'll use this terminal for everything from here on.
+
+- Press the **Windows key**, type **Ubuntu**, click it. A black terminal window opens.
+- Or: open **Windows Terminal** (install it from the Microsoft Store if you don't have it) and pick **Ubuntu** from the tab dropdown. This is nicer.
+
+You're now inside Linux. Your Windows files are at `/mnt/c/Users/yourname/` but **don't work there** — file I/O across the Windows/Linux boundary is slow and causes subtle issues with `make`. Keep this project on the Linux filesystem.
+
+#### Step 3 — Install Docker Desktop
+
+Download and install **[Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/)**.
+
+During or after install, open Docker Desktop and go to:  
+**Settings** (gear icon, top right) **→ Resources → WSL Integration**
+
+- Make sure **"Enable integration with my default WSL distro"** is ticked.
+- If you see your Ubuntu distro listed separately, toggle it on too.
+- Click **Apply & Restart**.
+
+Go back to your Ubuntu terminal and verify Docker is working:
+
+```bash
+docker ps
+```
+
+Expected output: an empty table with column headers (no error). If you get `permission denied` or `Cannot connect`, Docker Desktop is not running or the WSL integration wasn't saved — recheck the settings above.
+
+#### Step 4 — Install the project tools
+
+> ⚠️ `sudo apt install kind helm kubectl helmfile` **will not work** — these tools are not in Ubuntu's default package repository. The script below installs them from their official sources.
+
+In your Ubuntu terminal, clone this repo onto the **Linux** filesystem and run the install script:
+
+```bash
+# Clone into your Linux home directory (fast — stays on the Linux filesystem)
+cd ~
+git clone https://github.com/samdewaele/envoy-sidecar-test.git
+cd envoy-sidecar-test
+
+# Install all required tools
+chmod +x scripts/install-tools-wsl2.sh
+./scripts/install-tools-wsl2.sh
+```
+
+The script installs: `make`, `openssl`, `kubectl`, `helm`, `kind`, `helmfile`.  
+It takes about 2 minutes. Docker is skipped — it's already handled by Docker Desktop.
+
+#### Step 5 — Verify everything is ready
+
+```bash
+docker ps           # should show an empty table, no error
+kind version        # kind v0.23.x
+kubectl version --client --short
+helm version --short
+helmfile --version
+```
+
+All five commands should print a version number without errors. If any fail, re-run the install script or check the error message.
+
+You're ready. Continue to [Quick start](#quick-start) below.
+
+---
+
+### macOS
+
+#### Step 1 — Install Homebrew
+
+If you don't have it yet:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+#### Step 2 — Install Docker Desktop
+
+Download **[Docker Desktop for Mac](https://docs.docker.com/desktop/install/mac-install/)** and drag it to Applications.  
+Start it, wait for the whale icon to appear in the menu bar (that means it's running).
+
+#### Step 3 — Install the project tools
+
+```bash
+brew install kind kubectl helm helmfile openssl
+```
+
+#### Step 4 — Clone and verify
+
+```bash
+git clone https://github.com/samdewaele/envoy-sidecar-test.git
+cd envoy-sidecar-test
+docker ps && kind version && kubectl version --client --short && helm version --short && helmfile --version
+```
+
+All commands should print without errors. Continue to [Quick start](#quick-start).
+
+---
 
 ### Linux (native)
 
 ```bash
-# openssl — standard apt
-sudo apt install openssl
+# Basic tools
+sudo apt install -y make git curl openssl
 
 # kubectl — needs the Kubernetes apt repo (not in default Ubuntu repos)
 sudo mkdir -p /etc/apt/keyrings
@@ -41,47 +145,27 @@ curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key \
 echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] \
 https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /" \
   | sudo tee /etc/apt/sources.list.d/kubernetes.list
-sudo apt update && sudo apt install kubectl
+sudo apt update && sudo apt install -y kubectl
 
 # helm — official install script
 curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-# kind — binary release (not in apt)
+# kind — binary (not in apt)
 curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
 chmod +x /tmp/kind && sudo mv /tmp/kind /usr/local/bin/kind
 
-# helmfile — binary release (not in apt)
+# helmfile — binary (not in apt)
 curl -fsSLo /tmp/helmfile.tar.gz \
   https://github.com/helmfile/helmfile/releases/download/v0.162.0/helmfile_0.162.0_linux_amd64.tar.gz
-tar -xzf /tmp/helmfile.tar.gz -C /tmp helmfile
-sudo mv /tmp/helmfile /usr/local/bin/helmfile
+tar -xzf /tmp/helmfile.tar.gz -C /tmp helmfile && sudo mv /tmp/helmfile /usr/local/bin/
 
-# docker — Docker Engine via Docker's apt repo
+# docker engine
 curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER   # log out and back in after this
-```
+sudo usermod -aG docker $USER   # then log out and back in
 
-### Windows (WSL2)
-
-> ⚠️ **`sudo apt install kind helm kubectl helmfile docker` will fail** — none of these are in the standard Ubuntu apt repository. Use the steps below.
-
-**Step 1 — Docker**: Install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/).  
-After installing, go to **Settings → Resources → WSL Integration** and enable it for your distro.  
-Restart WSL. The `docker` command now works inside WSL2 without any `apt install`.
-
-**Step 2 — Everything else**: run the install script from inside your WSL2 terminal:
-
-```bash
-chmod +x scripts/install-tools-wsl2.sh
-./scripts/install-tools-wsl2.sh
-```
-
-The script installs `kubectl`, `helm`, `kind`, `helmfile`, and `openssl` using their official binary releases and apt repos. It skips Docker (handled by Docker Desktop above).
-
-### macOS
-
-```bash
-brew install kind kubectl helm helmfile openssl
+# clone
+git clone https://github.com/samdewaele/envoy-sidecar-test.git
+cd envoy-sidecar-test
 ```
 
 ---
