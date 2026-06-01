@@ -340,7 +340,7 @@ SHARED: static cluster
                   address: {{ .address }}
                   port_value: {{ .port }}
 {{- if .tls }}
-  {{ include "envoy.upstreamTLS" (dict "Values" .Values) | indent 2 }}
+{{- include "envoy.upstreamTLS" (dict "Values" .Values) | nindent 2 }}
 {{- end }}
 {{- end }}
 
@@ -385,32 +385,32 @@ static_resources:
                         "Values"       .Values
                         "allowedCNs"   .Values.podA.inbound.allowedClientCNs
                         "allowedCIDRs" .Values.podA.inbound.allowedSourceCIDRs
-                        "cnHeader"     .Values.podA.inbound.cnHeader) | indent 18 }}
-                  {{- include "envoy.jwtInjectorFilter" . | indent 18 }}
+                        "cnHeader"     .Values.podA.inbound.cnHeader) | nindent 18 }}
+                  {{- include "envoy.jwtInjectorFilter" . | nindent 18 }}
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 
     # ── Outbound: Pod B (mTLS — Pod B has an Envoy sidecar) ──────────────────
-    {{ include "envoy.outboundMTLSHTTPListener" (dict
+    {{- include "envoy.outboundMTLSHTTPListener" (dict
           "name"      "outbound_pod_b"
           "localPort" .Values.envoy.ports.outboundPodB
-          "cluster"   "pod_b") | indent 4 }}
+          "cluster"   "pod_b") | nindent 4 }}
 
     # ── Outbound: Kafka mock (plain TCP — toy mock, no TLS) ───────────────────
-    {{ include "envoy.outboundTCPListener" (dict
+    {{- include "envoy.outboundTCPListener" (dict
           "name"      "outbound_kafka"
           "localPort" .Values.envoy.ports.outboundKafka
-          "cluster"   "kafka") | indent 4 }}
+          "cluster"   "kafka") | nindent 4 }}
 
     # ── Outbound: LLM Gateway mock (plain HTTP — toy mock) ───────────────────
-    {{ include "envoy.outboundHTTPListener" (dict
+    {{- include "envoy.outboundHTTPListener" (dict
           "name"      "outbound_llm"
           "localPort" .Values.envoy.ports.outboundLLM
-          "cluster"   "llm_gateway") | indent 4 }}
+          "cluster"   "llm_gateway") | nindent 4 }}
 
     # ── Outbound: Blocked (whitelist-violation test) ──────────────────────────
-    {{ include "envoy.blockedListener" . | indent 4 }}
+    {{- include "envoy.blockedListener" . | nindent 4 }}
 
   clusters:
     - name: local_app
@@ -427,36 +427,36 @@ static_resources:
                       port_value: {{ .Values.envoy.ports.appPort }}
 
     # Pod B — mTLS: ALWAYS on (Pod B's Envoy requires client cert)
-    {{ include "envoy.cluster" (dict
+    {{- include "envoy.cluster" (dict
           "name"    "pod_b"
           "address" .Values.podA.outbound.podB.address
           "port"    .Values.podA.outbound.podB.port
           "tls"     true
-          "Values"  .Values) | indent 4 }}
+          "Values"  .Values) | nindent 4 }}
 
     # Kafka mock — mTLS TCP
-    {{ include "envoy.cluster" (dict
+    {{- include "envoy.cluster" (dict
           "name"    "kafka"
           "address" .Values.podA.outbound.kafka.address
           "port"    .Values.podA.outbound.kafka.port
           "tls"     true
-          "Values"  .Values) | indent 4 }}
+          "Values"  .Values) | nindent 4 }}
 
     # LLM Gateway mock — mTLS
-    {{ include "envoy.cluster" (dict
+    {{- include "envoy.cluster" (dict
           "name"    "llm_gateway"
           "address" .Values.podA.outbound.llmGateway.address
           "port"    .Values.podA.outbound.llmGateway.port
           "tls"     true
-          "Values"  .Values) | indent 4 }}
+          "Values"  .Values) | nindent 4 }}
 
     # Blocked mock — mTLS (DEV/QA only; PROD never reaches this cluster)
-    {{ include "envoy.cluster" (dict
+    {{- include "envoy.cluster" (dict
           "name"    "blocked_mock"
           "address" "blocked-mock"
           "port"    .Values.mocks.blocked.httpPort
           "tls"     true
-          "Values"  .Values) | indent 4 }}
+          "Values"  .Values) | nindent 4 }}
 {{- end }}
 
 
@@ -501,32 +501,32 @@ static_resources:
                         "Values"       .Values
                         "allowedCNs"   .Values.podB.inbound.allowedClientCNs
                         "allowedCIDRs" .Values.podB.inbound.allowedSourceCIDRs
-                        "cnHeader"     .Values.podB.inbound.cnHeader) | indent 18 }}
-                  {{- include "envoy.jwtInjectorFilter" . | indent 18 }}
+                        "cnHeader"     .Values.podB.inbound.cnHeader) | nindent 18 }}
+                  {{- include "envoy.jwtInjectorFilter" . | nindent 18 }}
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 
     # ── Outbound: Kafka mock (plain TCP — toy mock) ───────────────────────────
-    {{ include "envoy.outboundTCPListener" (dict
+    {{- include "envoy.outboundTCPListener" (dict
           "name"      "outbound_kafka"
           "localPort" .Values.envoy.ports.outboundKafka
-          "cluster"   "kafka") | indent 4 }}
+          "cluster"   "kafka") | nindent 4 }}
 
     # ── Outbound: STS mock (plain HTTP — toy mock) ────────────────────────────
-    {{ include "envoy.outboundHTTPListener" (dict
+    {{- include "envoy.outboundHTTPListener" (dict
           "name"      "outbound_sts"
           "localPort" .Values.envoy.ports.outboundSTS
-          "cluster"   "sts") | indent 4 }}
+          "cluster"   "sts") | nindent 4 }}
 
     # ── Outbound: Internal API mock (plain HTTP — toy mock) ───────────────────
-    {{ include "envoy.outboundHTTPListener" (dict
+    {{- include "envoy.outboundHTTPListener" (dict
           "name"      "outbound_internal"
           "localPort" .Values.envoy.ports.outboundInternal
-          "cluster"   "internal_api") | indent 4 }}
+          "cluster"   "internal_api") | nindent 4 }}
 
     # ── Outbound: Blocked ────────────────────────────────────────────────────
-    {{ include "envoy.blockedListener" . | indent 4 }}
+    {{- include "envoy.blockedListener" . | nindent 4 }}
 
   clusters:
     - name: local_app
@@ -542,32 +542,32 @@ static_resources:
                       address: 127.0.0.1
                       port_value: {{ .Values.envoy.ports.appPort }}
 
-    {{ include "envoy.cluster" (dict
+    {{- include "envoy.cluster" (dict
           "name"    "kafka"
           "address" .Values.podB.outbound.kafka.address
           "port"    .Values.podB.outbound.kafka.port
           "tls"     true
-          "Values"  .Values) | indent 4 }}
+          "Values"  .Values) | nindent 4 }}
 
-    {{ include "envoy.cluster" (dict
+    {{- include "envoy.cluster" (dict
           "name"    "sts"
           "address" .Values.podB.outbound.sts.address
           "port"    .Values.podB.outbound.sts.port
           "tls"     true
-          "Values"  .Values) | indent 4 }}
+          "Values"  .Values) | nindent 4 }}
 
-    {{ include "envoy.cluster" (dict
+    {{- include "envoy.cluster" (dict
           "name"    "internal_api"
           "address" .Values.podB.outbound.internalAPI.address
           "port"    .Values.podB.outbound.internalAPI.port
           "tls"     true
-          "Values"  .Values) | indent 4 }}
+          "Values"  .Values) | nindent 4 }}
 
     # Blocked mock — mTLS (DEV/QA only; PROD never reaches this cluster)
-    {{ include "envoy.cluster" (dict
+    {{- include "envoy.cluster" (dict
           "name"    "blocked_mock"
           "address" "blocked-mock"
           "port"    .Values.mocks.blocked.httpPort
           "tls"     true
-          "Values"  .Values) | indent 4 }}
+          "Values"  .Values) | nindent 4 }}
 {{- end }}
