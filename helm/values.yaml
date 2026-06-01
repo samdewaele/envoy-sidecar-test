@@ -90,13 +90,13 @@ f5Sim:
 # HAProxy — re-encrypts from f5-sim toward Pod A's Envoy
 #
 # Traffic flow:
-#   f5-sim ──HTTP+header──▶ haproxy:8080 ──TLS──▶ pod-a-service:8443
+#   f5-sim ──mTLS──▶ haproxy:8443 ──mTLS──▶ pod-a-service:8443
 # ---------------------------------------------------------------------------
 haproxy:
   enabled: true
   image: haproxy:2.9-alpine
   replicas: 1
-  port: 443              # HAProxy listens here for mTLS traffic from f5-sim
+  port: 8443             # HAProxy listens here for mTLS traffic from f5-sim
 
   tls:
     secretName: haproxy-certs   # contains: haproxy.pem (cert+key bundle), ca.crt
