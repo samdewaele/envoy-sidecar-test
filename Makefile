@@ -31,7 +31,7 @@ export TESTAPP_IMAGE
 CALICO_VERSION := v3.27.3
 CALICO_URL     := https://raw.githubusercontent.com/projectcalico/calico/$(CALICO_VERSION)/manifests/calico.yaml
 
-.PHONY: help cluster calico registry build push certs \
+.PHONY: help cluster calico registry build push certs plugins \
         dev qa prod \
         test-dev test-qa test-prod \
         logs-f5 logs-haproxy logs-a logs-b \
@@ -44,6 +44,7 @@ help:
 	@echo "  Infrastructure"
 	@echo "    make cluster      create kind cluster (Calico CNI, NodePort on :30443)"
 	@echo "    make registry     start local image registry on port 5001"
+	@echo "    make plugins      install helm-diff plugin (auto-run by dev/qa/prod)"
 	@echo "    make down         destroy cluster + registry"
 	@echo ""
 	@echo "  Image"
@@ -69,6 +70,16 @@ help:
 	@echo "    make logs-a       tail Pod A Envoy logs"
 	@echo "    make logs-b       tail Pod B Envoy logs"
 	@echo ""
+
+# ── Helm plugins ─────────────────────────────────────────────────────────────
+# helmfile apply uses `helm diff` internally — this plugin is not bundled
+# with helm and must be installed once.  This target is a no-op if it is
+# already present, so it is safe to declare as a dependency of dev/qa/prod.
+
+plugins:
+	@helm plugin list 2>/dev/null | grep -q "^diff" \
+	  && echo "helm-diff already installed" \
+	  || helm plugin install https://github.com/databus23/helm-diff
 
 # ── Infrastructure ────────────────────────────────────────────────────────────
 
@@ -108,20 +119,20 @@ certs:
 # helmfile merges base values + environment values automatically.
 # Image is injected via TESTAPP_IMAGE env var (set at top of this file).
 
-dev: push certs
+dev: push certs plugins
 	helmfile -e dev apply
 	@echo ""
 	@echo "✅  DEV stack deployed"
 	@echo "    Traffic: test-client → f5-sim (no TLS) → haproxy → pod-a envoy (no TLS) → app"
 
-qa: push certs
+qa: push certs plugins
 	helmfile -e qa apply
 	@echo ""
 	@echo "✅  QA stack deployed"
 	@echo "    Traffic: test-client ──mTLS──▶ f5-sim ──HTTP+CN──▶ haproxy ──TLS──▶ pod-a envoy ──▶ app"
 	@echo "    Violations: logged with shadow_result=DENY — run 'make logs-a' to watch"
 
-prod: push certs
+prod: push certs plugins
 	helmfile -e prod apply
 	@echo ""
 	@echo "✅  PROD stack deployed"
