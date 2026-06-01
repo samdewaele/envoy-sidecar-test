@@ -41,22 +41,14 @@ jobs:
       - name: Render and validate YAML for all environments
         run: |
           for env in dev qa prod; do
-            echo "── helm template $env ──────────────────────────"
+            echo "-- template $env --"
             helm template envoy-sidecar ./helm \
               --values helm/values.yaml \
               --values "helm/values-${env}.yaml" \
               --set podA.image=testapp:latest \
               --set podB.image=testapp:latest \
               --set mocks.image=testapp:latest \
-              > /tmp/rendered-${env}.yaml
-
-            # PyYAML catches structural YAML errors that helm lint misses
-            python3 -c "
-import yaml
-with open('/tmp/rendered-${env}.yaml') as f:
-    docs = [d for d in yaml.safe_load_all(f) if d is not None]
-print(f'  {len(docs)} manifests rendered — YAML valid')
-"
+            | python3 -c "import sys,yaml; n=sum(1 for d in yaml.safe_load_all(sys.stdin) if d); print(n,'manifests OK')"
           done
 
   # ───────────────────────────────────────────────────────────────────────────
