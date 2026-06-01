@@ -87,9 +87,10 @@ jobs:
           sudo mv /tmp/helmfile /usr/local/bin/helmfile
 
       - name: Install helm-diff plugin
-        # v3.9.9 is the last release before platformHooks was added to plugin.yaml,
+        # Install from release tarball — avoids git-URL verification errors.
+        # v3.9.9: last release before platformHooks was added to plugin.yaml,
         # which Helm 3.16+ rejects as an unknown field.
-        run: helm plugin install https://github.com/databus23/helm-diff --version v3.9.9 --verify=false
+        run: helm plugin install https://github.com/databus23/helm-diff/releases/download/v3.9.9/helm-diff-linux-amd64.tgz
 
       # ── cluster ───────────────────────────────────────────────────────────
       - name: Create Kind cluster
