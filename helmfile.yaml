@@ -86,4 +86,4 @@ releases:
 
     # Wait for all pods to be ready before helmfile considers the release done.
     wait: true
-    timeout: 120
+    timeout: 300   # 5 min — first install pulls images and waits for Calico
