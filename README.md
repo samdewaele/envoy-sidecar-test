@@ -80,7 +80,7 @@ chmod +x scripts/install-tools-wsl2.sh
 ./scripts/install-tools-wsl2.sh
 ```
 
-The script installs: `make`, `openssl`, `kubectl`, `helm`, `kind`, `helmfile`.  
+The script installs: `make`, `openssl`, `kubectl`, `helm`, `kind`, `helmfile`, and the `helm-diff` plugin.  
 It takes about 2 minutes. Docker is skipped — it's already handled by Docker Desktop.
 
 #### Step 5 — Verify everything is ready
@@ -118,6 +118,9 @@ Start it, wait for the whale icon to appear in the menu bar (that means it's run
 
 ```bash
 brew install kind kubectl helm helmfile openssl
+
+# helm-diff plugin — required by helmfile, not bundled with helm
+helm plugin install https://github.com/databus23/helm-diff
 ```
 
 #### Step 4 — Clone and verify
@@ -125,6 +128,10 @@ brew install kind kubectl helm helmfile openssl
 ```bash
 git clone https://github.com/samdewaele/envoy-sidecar-test.git
 cd envoy-sidecar-test
+
+# helm-diff plugin — required by helmfile, not bundled with helm
+helm plugin install https://github.com/databus23/helm-diff
+
 docker ps && kind version && kubectl version --client --short && helm version --short && helmfile --version
 ```
 
@@ -158,6 +165,9 @@ chmod +x /tmp/kind && sudo mv /tmp/kind /usr/local/bin/kind
 curl -fsSLo /tmp/helmfile.tar.gz \
   https://github.com/helmfile/helmfile/releases/download/v0.162.0/helmfile_0.162.0_linux_amd64.tar.gz
 tar -xzf /tmp/helmfile.tar.gz -C /tmp helmfile && sudo mv /tmp/helmfile /usr/local/bin/
+
+# helm-diff plugin — required by helmfile, not bundled with helm
+helm plugin install https://github.com/databus23/helm-diff
 
 # docker engine
 curl -fsSL https://get.docker.com | sh

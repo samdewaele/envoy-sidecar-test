@@ -60,11 +60,19 @@ tar -xzf /tmp/helmfile.tar.gz -C /tmp helmfile
 sudo mv /tmp/helmfile "$BIN/helmfile"
 rm /tmp/helmfile.tar.gz
 
+# ── helm-diff plugin ─────────────────────────────────────────────────────────
+# helmfile uses `helm diff` internally for every apply/sync.
+# This plugin is not bundled with helm — it must be installed separately.
+echo "▶  Installing helm-diff plugin"
+helm plugin install https://github.com/databus23/helm-diff 2>/dev/null \
+  || helm plugin update diff   # already installed — just update it
+
 # ── verify ────────────────────────────────────────────────────────────────────
 echo ""
 echo "✅  Installed versions:"
 kubectl version --client --short 2>/dev/null || kubectl version --client
 helm version --short
+helm plugin list
 kind version
 helmfile --version
 openssl version
