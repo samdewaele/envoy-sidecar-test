@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Cancel in-flight runs for the same branch when a new push arrives
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 1 — fast feedback, no cluster needed
+  # Lints the chart and validates that all three environment overlays render
+  # to parseable YAML without a running cluster.
+  # ───────────────────────────────────────────────────────────────────────────
+  lint:
+    name: Helm lint & template render
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: '3.16.4'
+
+      - name: Lint all environments
+        run: |
+          for env in dev qa prod; do
+            echo "── helm lint $env ──────────────────────────────"
+            helm lint ./helm \
+              --values helm/values.yaml \
+              --values "helm/values-${env}.yaml" \
+              --strict
+          done
+
+      - name: Render and validate YAML for all environments
+        run: |
+          for env in dev qa prod; do
+            echo "── helm template $env ──────────────────────────"
+            helm template envoy-sidecar ./helm \
+              --values helm/values.yaml \
+              --values "helm/values-${env}.yaml" \
+              --set podA.image=testapp:latest \
+              --set podB.image=testapp:latest \
+              --set mocks.image=testapp:latest \
+              > /tmp/rendered-${env}.yaml
+
+            # PyYAML catches structural YAML errors that helm lint misses
+            python3 -c "
+import yaml
+with open('/tmp/rendered-${env}.yaml') as f:
+    docs = [d for d in yaml.safe_load_all(f) if d is not None]
+print(f'  {len(docs)} manifests rendered — YAML valid')
+"
+          done
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 2 — full integration test
+  # Spins up a real Kind cluster, deploys the stack in dev mode, waits for
+  # every pod to become Ready, then runs the smoke tests.
+  # ───────────────────────────────────────────────────────────────────────────
+  integration:
+    name: Integration test (dev mode)
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── tool installation ──────────────────────────────────────────────────
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: '3.16.4'
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: '1.29.0'
+
+      - name: Install kind
+        run: |
+          curl -fsSLo /tmp/kind \
+            https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
+          chmod +x /tmp/kind && sudo mv /tmp/kind /usr/local/bin/kind
+
+      - name: Install helmfile
+        run: |
+          curl -fsSLo /tmp/helmfile.tar.gz \
+            https://github.com/helmfile/helmfile/releases/download/v0.162.0/helmfile_0.162.0_linux_amd64.tar.gz
+          tar xzf /tmp/helmfile.tar.gz -C /tmp helmfile
+          sudo mv /tmp/helmfile /usr/local/bin/helmfile
+
+      - name: Install helm-diff plugin
+        run: helm plugin install https://github.com/databus23/helm-diff
+
+      # ── cluster ───────────────────────────────────────────────────────────
+      - name: Create Kind cluster
+        run: kind create cluster --config kind-config.yaml --wait 60s
+
+      - name: Install Calico CNI
+        run: |
+          kubectl apply -f \
+            https://raw.githubusercontent.com/projectcalico/calico/v3.27.3/manifests/calico.yaml
+          kubectl rollout status daemonset/calico-node \
+            -n kube-system --timeout=120s
+
+      # ── deploy ────────────────────────────────────────────────────────────
+      # make dev: build → kind load → generate certs + k8s secrets → helmfile apply
+      - name: Deploy dev stack
+        run: make dev
+
+      # ── smoke test ────────────────────────────────────────────────────────
+      - name: Smoke test
+        run: make test-dev
+
+      # ── diagnostics (always runs so failures are readable) ────────────────
+      - name: Pod status
+        if: always()
+        run: |
+          echo "════ pods ════════════════════════════════════════════"
+          kubectl get pods -n envoy-test -o wide
+
+          echo ""
+          echo "════ events (last 30) ════════════════════════════════"
+          kubectl get events -n envoy-test \
+            --sort-by='.lastTimestamp' | tail -30
+
+          echo ""
+          echo "════ logs for non-Running pods ═══════════════════════"
+          kubectl get pods -n envoy-test --no-headers \
+            | grep -v ' Running ' \
+            | awk '{print $1}' \
+            | while read pod; do
+                echo "--- $pod ---"
+                kubectl logs -n envoy-test "$pod" \
+                  --all-containers --tail=40 2>/dev/null || true
+              done
