@@ -33,7 +33,8 @@ envoy:
   ports:
     inbound: 8443          # Envoy listens here; exposed as the pod's service port
     appPort: 9090          # App container listens here (localhost only)
-    admin: 9901            # Envoy admin interface (localhost only)
+    admin: 9901            # Envoy admin interface (localhost only — never exposed)
+    health: 9902           # plain-HTTP health listener on 0.0.0.0 for kubelet probes
 
     # Outbound localhost listeners — app connects to these instead of real addresses
     outboundPodB:      19080

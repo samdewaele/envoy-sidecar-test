@@ -185,6 +185,47 @@ validation (JWT_PUBKEY_FILE env var will not be set).
 
 {{/*
 ─────────────────────────────────────────────────────────────────────────────
+SHARED: health listener — plain HTTP on 0.0.0.0 for kubelet liveness/readiness.
+
+The admin interface stays bound to 127.0.0.1 (it exposes /config_dump,
+/quitquitquit and other sensitive endpoints — never expose it on the pod IP).
+This listener returns a static 200 via direct_response so kubelet, which
+probes from outside the pod's network namespace, has something reachable.
+It carries no application traffic and needs no mTLS.
+─────────────────────────────────────────────────────────────────────────────
+*/}}
+{{- define "envoy.healthListener" -}}
+- name: health
+  address:
+    socket_address:
+      address: 0.0.0.0
+      port_value: {{ .Values.envoy.ports.health }}
+  filter_chains:
+    - filters:
+        - name: envoy.filters.network.http_connection_manager
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+            stat_prefix: health
+            codec_type: AUTO
+            route_config:
+              name: health_route
+              virtual_hosts:
+                - name: health
+                  domains: ["*"]
+                  routes:
+                    - match: { prefix: "/" }
+                      direct_response:
+                        status: 200
+                        body:
+                          inline_string: "OK"
+            http_filters:
+              - name: envoy.filters.http.router
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+{{- end }}
+
+{{/*
+─────────────────────────────────────────────────────────────────────────────
 SHARED: outbound TCP-proxy listener (plain TCP, e.g. Kafka mock)
 ─────────────────────────────────────────────────────────────────────────────
 */}}
@@ -391,6 +432,9 @@ static_resources:
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 
+    # ── Health (plain HTTP on 0.0.0.0 for kubelet probes) ─────────────────────
+    {{- include "envoy.healthListener" . | nindent 4 }}
+
     # ── Outbound: Pod B (mTLS — Pod B has an Envoy sidecar) ──────────────────
     {{- include "envoy.outboundMTLSHTTPListener" (dict
           "name"      "outbound_pod_b"
@@ -506,6 +550,9 @@ static_resources:
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    # ── Health (plain HTTP on 0.0.0.0 for kubelet probes) ─────────────────────
+    {{- include "envoy.healthListener" . | nindent 4 }}
 
     # ── Outbound: Kafka mock (plain TCP — toy mock) ───────────────────────────
     {{- include "envoy.outboundTCPListener" (dict

@@ -77,10 +77,11 @@ spec:
           volumeMounts:
             {{- include "mock.tlsVolumeMount" . | nindent 12 }}
           readinessProbe:
-            httpGet:
-              path: /health
+            # tcpSocket, not httpGet: the mock serves mTLS and kubelet has no
+            # client cert, so an HTTPS probe fails the handshake. A TCP check
+            # confirms the listener is up, which is enough for a mock.
+            tcpSocket:
               port: 8080
-              scheme: HTTPS
             initialDelaySeconds: 3
             periodSeconds: 5
           {{ include "mock.securityContext" . | nindent 10 }}
@@ -124,10 +125,8 @@ spec:
           volumeMounts:
             {{- include "mock.tlsVolumeMount" . | nindent 12 }}
           readinessProbe:
-            httpGet:
-              path: /health
+            tcpSocket:
               port: {{ .Values.mocks.llmGateway.httpPort }}
-              scheme: HTTPS
             initialDelaySeconds: 3
             periodSeconds: 5
           {{ include "mock.securityContext" . | nindent 10 }}
@@ -171,10 +170,8 @@ spec:
           volumeMounts:
             {{- include "mock.tlsVolumeMount" . | nindent 12 }}
           readinessProbe:
-            httpGet:
-              path: /health
+            tcpSocket:
               port: {{ .Values.mocks.sts.httpPort }}
-              scheme: HTTPS
             initialDelaySeconds: 3
             periodSeconds: 5
           {{ include "mock.securityContext" . | nindent 10 }}
@@ -218,10 +215,8 @@ spec:
           volumeMounts:
             {{- include "mock.tlsVolumeMount" . | nindent 12 }}
           readinessProbe:
-            httpGet:
-              path: /health
+            tcpSocket:
               port: {{ .Values.mocks.internalAPI.httpPort }}
-              scheme: HTTPS
             initialDelaySeconds: 3
             periodSeconds: 5
           {{ include "mock.securityContext" . | nindent 10 }}
@@ -265,10 +260,8 @@ spec:
           volumeMounts:
             {{- include "mock.tlsVolumeMount" . | nindent 12 }}
           readinessProbe:
-            httpGet:
-              path: /health
+            tcpSocket:
               port: {{ .Values.mocks.blocked.httpPort }}
-              scheme: HTTPS
             initialDelaySeconds: 3
             periodSeconds: 5
           {{ include "mock.securityContext" . | nindent 10 }}

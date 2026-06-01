@@ -47,14 +47,14 @@ spec:
             {{- end }}
           readinessProbe:
             httpGet:
-              path: /ready
-              port: {{ .Values.envoy.ports.admin }}
+              path: /
+              port: {{ .Values.envoy.ports.health }}
             initialDelaySeconds: 3
             periodSeconds: 5
           livenessProbe:
             httpGet:
-              path: /ready
-              port: {{ .Values.envoy.ports.admin }}
+              path: /
+              port: {{ .Values.envoy.ports.health }}
             initialDelaySeconds: 10
             periodSeconds: 15
           resources:
