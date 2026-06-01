@@ -85,7 +85,7 @@ jobs:
       - name: Install helm-diff plugin
         # v3.9.9 is the last release before platformHooks was added to plugin.yaml,
         # which Helm 3.16+ rejects as an unknown field.
-        run: helm plugin install https://github.com/databus23/helm-diff --version v3.9.9
+        run: helm plugin install https://github.com/databus23/helm-diff --version v3.9.9 --verify=false
 
       # ── cluster ───────────────────────────────────────────────────────────
       - name: Create Kind cluster

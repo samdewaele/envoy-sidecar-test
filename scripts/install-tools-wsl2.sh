@@ -65,7 +65,7 @@ rm /tmp/helmfile.tar.gz
 # This plugin is not bundled with helm — it must be installed separately.
 echo "▶  Installing helm-diff plugin (v3.9.9)"
 # v3.9.9: last release before platformHooks was added, which Helm 3.16+ rejects
-helm plugin install https://github.com/databus23/helm-diff --version v3.9.9 2>/dev/null \
+helm plugin install https://github.com/databus23/helm-diff --version v3.9.9 --verify=false 2>/dev/null \
   || true   # already installed — no-op
 
 # ── verify ────────────────────────────────────────────────────────────────────
