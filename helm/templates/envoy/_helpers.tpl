@@ -371,7 +371,7 @@ static_resources:
                 stat_prefix: inbound_pod_a
                 codec_type: AUTO
                 use_remote_address: true
-                {{ include "envoy.accessLog" . | indent 16 }}
+                {{- include "envoy.accessLog" . | nindent 16 }}
                 route_config:
                   name: inbound_route
                   virtual_hosts:
@@ -487,7 +487,7 @@ static_resources:
                 stat_prefix: inbound_pod_b
                 codec_type: AUTO
                 use_remote_address: true
-                {{ include "envoy.accessLog" . | indent 16 }}
+                {{- include "envoy.accessLog" . | nindent 16 }}
                 route_config:
                   name: inbound_route
                   virtual_hosts:

@@ -89,19 +89,22 @@ func mustLoadCertPool(caFile string) *x509.CertPool {
 	return pool
 }
 
-// listenAndServe always binds to 127.0.0.1 — the app must never be reachable
-// directly from the pod network. All inbound traffic arrives through Envoy.
+// listenAndServe binds to LISTEN_ADDR (default 127.0.0.1).
+// Pod-a and pod-b apps keep the default: all inbound traffic arrives through
+// the Envoy sidecar so the app is never reachable directly from the network.
+// Mock targets set LISTEN_ADDR=0.0.0.0 because they have no sidecar — Envoy
+// from other pods connects to them directly, as does the kubelet health check.
 func listenAndServe(port string, handler http.Handler, tlsCfg *tls.Config) error {
-	addr := "127.0.0.1:" + port
+	addr := getenv("LISTEN_ADDR", "127.0.0.1") + ":" + port
 	if tlsCfg != nil {
 		ln, err := tls.Listen("tcp", addr, tlsCfg)
 		if err != nil {
 			return err
 		}
-		log.Printf("listening on %s (HTTPS/mTLS, loopback only)", addr)
+		log.Printf("listening on %s (HTTPS/mTLS)", addr)
 		return http.Serve(ln, handler)
 	}
-	log.Printf("listening on %s (HTTP, loopback only)", addr)
+	log.Printf("listening on %s (HTTP)", addr)
 	return http.ListenAndServe(addr, handler)
 }
 

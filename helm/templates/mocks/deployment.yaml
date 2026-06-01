@@ -5,6 +5,8 @@ Envoy's outbound clusters connect to them over mTLS.
 */}}
 
 {{- define "mock.tlsEnv" -}}
+- name: LISTEN_ADDR
+  value: "0.0.0.0"
 - name: TLS_CERT
   value: {{ $.Values.mocks.tls.mountPath }}/tls.crt
 - name: TLS_KEY
