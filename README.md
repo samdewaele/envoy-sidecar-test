@@ -201,26 +201,18 @@ Expected output:
 ✅  Cluster ready
 ```
 
-### 2. Start the local image registry
+### 2. Build and load the testapp image
 
 ```bash
-make registry
+make push
 ```
 
-Runs a local Docker registry on `localhost:5001` and connects it to the Kind network.
-Only needed once per machine.
-
-### 3. Build and push the testapp image
-
-```bash
-make build
-```
-
-Builds `testapp/main.go` into a minimal Go binary and pushes it to the local registry.
+Builds `testapp/main.go` into a minimal Go binary and loads it directly into the Kind
+cluster nodes using `kind load docker-image` — no registry required.
 The same image is used for Pod A, Pod B, and all mock targets — role is set by the
 `APP_ROLE` env var.
 
-### 4. Generate certificates
+### 3. Generate certificates
 
 ```bash
 make certs

@@ -49,7 +49,7 @@ help:
 	@echo ""
 	@echo "  Image"
 	@echo "    make build        build testapp Docker image"
-	@echo "    make push         build + push to local registry"
+	@echo "    make push         build + load image into Kind nodes (no registry needed)"
 	@echo ""
 	@echo "  Certs"
 	@echo "    make certs        generate self-signed certs + load as k8s secrets"
@@ -106,8 +106,10 @@ registry:
 build:
 	docker build -t $(TESTAPP_IMAGE) ./testapp
 
-push: build registry
-	docker push $(TESTAPP_IMAGE)
+push: build
+	@echo "▶  Loading image into Kind nodes..."
+	kind load docker-image $(TESTAPP_IMAGE) --name $(CLUSTER)
+	@echo "✅  Image ready in cluster"
 
 # ── Certificates ─────────────────────────────────────────────────────────────
 
