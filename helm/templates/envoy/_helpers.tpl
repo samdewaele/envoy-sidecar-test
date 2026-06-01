@@ -340,7 +340,7 @@ SHARED: static cluster
                   address: {{ .address }}
                   port_value: {{ .port }}
 {{- if .tls }}
-  {{ include "envoy.upstreamTLS" .Values | indent 2 }}
+  {{ include "envoy.upstreamTLS" (dict "Values" .Values) | indent 2 }}
 {{- end }}
 {{- end }}
 
