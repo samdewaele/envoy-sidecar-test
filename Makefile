@@ -143,8 +143,9 @@ prod: push certs plugins
 # ── Tests ────────────────────────────────────────────────────────────────────
 # All requests go from the test-client pod through f5-sim (NodePort :30443).
 # The client pod has its certs mounted at /certs.
+# mTLS is ALWAYS on (every mode), so every test presents the client cert.
+# Modes differ only in how the whitelist is enforced, not in transport.
 
-_curl_dev  = kubectl exec -n $(NS) client -- curl -sf --max-time 5
 _curl_mtls = kubectl exec -n $(NS) client -- curl -sf --max-time 5 \
                --cert /certs/client.crt \
                --key  /certs/client.key \
@@ -156,15 +157,15 @@ F5 := https://f5-sim.$(NS).svc.cluster.local
 test-dev:
 	@echo "\n════ DEV smoke test ════"
 	@echo "→ health check via f5-sim"
-	$(_curl_dev) $(F5)/health && echo " ✅"
+	$(_curl_mtls) $(F5)/health && echo " ✅"
 	@echo "→ pod-a calls pod-b"
-	$(_curl_dev) $(F5)/call-b && echo " ✅"
+	$(_curl_mtls) $(F5)/call-b && echo " ✅"
 	@echo "→ pod-a calls kafka"
-	$(_curl_dev) $(F5)/call-kafka && echo " ✅"
+	$(_curl_mtls) $(F5)/call-kafka && echo " ✅"
 	@echo "→ pod-a calls llm-gateway"
-	$(_curl_dev) $(F5)/call-llm && echo " ✅"
+	$(_curl_mtls) $(F5)/call-llm && echo " ✅"
 	@echo "→ /call-blocked (should SUCCEED in DEV — no enforcement)"
-	$(_curl_dev) $(F5)/call-blocked && echo " ✅ (expected: passed through)"
+	$(_curl_mtls) $(F5)/call-blocked && echo " ✅ (expected: passed through)"
 	@echo "\n✅  DEV: all paths open"
 
 test-qa:
