@@ -66,9 +66,8 @@ rm /tmp/helmfile.tar.gz
 echo "▶  Installing helm-diff plugin (v3.9.9)"
 # Install from release tarball — avoids git-URL verification errors.
 # v3.9.9: last release before platformHooks was added, which Helm 3.16+ rejects.
-helm plugin install \
-  "https://github.com/databus23/helm-diff/releases/download/v3.9.9/helm-diff-linux-${ARCH}.tgz" \
-  2>/dev/null || true   # already installed — no-op
+rm -rf ~/.local/share/helm/plugins/helm-diff ~/.cache/helm/plugins/helm-diff
+helm plugin install https://github.com/databus23/helm-diff --version 3.9.9
 
 # ── verify ────────────────────────────────────────────────────────────────────
 echo ""
