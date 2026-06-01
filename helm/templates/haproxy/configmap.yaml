@@ -37,10 +37,9 @@ data:
 
     # ── Backend: mTLS re-encrypt toward Pod A's Envoy ─────────────────────────
     # HAProxy opens a new TLS connection to Pod A's Envoy and presents its cert.
+    # No HTTP health check — Pod A's inbound listener is mTLS only and
+    # Kubernetes manages pod health through its own readiness probes.
     backend bk_pod_a
       mode http
       balance roundrobin
-      option  httpchk GET /healthz/ready HTTP/1.1\r\nHost:\ localhost
-      server pod-a \
-        pod-a-service.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.podA.service.port }} \
-        ssl verify required ca-file /certs/ca.crt crt /certs/haproxy.pem
+      server pod-a pod-a-service.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.podA.service.port }} ssl verify required ca-file /certs/ca.crt crt /certs/haproxy.pem

@@ -23,7 +23,6 @@ SHARED: admin block
 */}}
 {{- define "envoy.admin" -}}
 admin:
-  access_log_path: /dev/null
   address:
     socket_address:
       address: 127.0.0.1
@@ -108,9 +107,9 @@ SHARED: HTTP RBAC filter — mode-driven, never removes mTLS.
   typed_config:
     "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC
 {{- if eq $mode "qa" }}
-    # QA: shadow rules — same logic as prod but traffic is never dropped.
+    # QA: shadow_rules only — policy is evaluated and logged but never enforced.
+    # rules: is intentionally absent; an empty rules: {} would deny all traffic.
     # Look for shadow_result=DENY in the access log to spot violations.
-    rules: {}
     shadow_rules_stat_prefix: "whitelist_shadow."
     shadow_rules:
 {{- else }}
@@ -163,23 +162,24 @@ validation (JWT_PUBKEY_FILE env var will not be set).
 - name: envoy.filters.http.lua
   typed_config:
     "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
-    inline_code: |
-      -- Token is loaded lazily once per worker thread and then cached.
-      local _jwt_token = nil
-      function envoy_on_request(request_handle)
-        if _jwt_token == nil then
-          local f = io.open("{{ .Values.envoy.jwt.tokenMountPath }}/jwt.token", "r")
-          if f then
-            _jwt_token = f:read("*l") or ""
-            f:close()
-          else
-            _jwt_token = ""
+    default_source_code:
+      inline_string: |
+        -- Token is loaded lazily once per worker thread and then cached.
+        local _jwt_token = nil
+        function envoy_on_request(request_handle)
+          if _jwt_token == nil then
+            local f = io.open("{{ .Values.envoy.jwt.tokenMountPath }}/jwt.token", "r")
+            if f then
+              _jwt_token = f:read("*l") or ""
+              f:close()
+            else
+              _jwt_token = ""
+            end
+          end
+          if _jwt_token ~= "" then
+            request_handle:headers():replace("{{ .Values.envoy.jwt.headerName }}", "Bearer " .. _jwt_token)
           end
         end
-        if _jwt_token ~= "" then
-          request_handle:headers():replace("{{ .Values.envoy.jwt.headerName }}", "Bearer " .. _jwt_token)
-        end
-      end
 {{- end -}}
 {{- end }}
 
