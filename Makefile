@@ -79,7 +79,7 @@ help:
 plugins:
 	@helm plugin list 2>/dev/null | grep -q "^diff" \
 	  && echo "helm-diff already installed" \
-	  || helm plugin install https://github.com/databus23/helm-diff
+	  || helm plugin install https://github.com/databus23/helm-diff --version v3.9.9
 
 # ── Infrastructure ────────────────────────────────────────────────────────────
 
