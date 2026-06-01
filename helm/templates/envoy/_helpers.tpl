@@ -363,7 +363,7 @@ static_resources:
           address: 0.0.0.0
           port_value: {{ .Values.envoy.ports.inbound }}
       filter_chains:
-        - {{ include "envoy.downstreamTLS" . | indent 10 }}
+        - {{ include "envoy.downstreamTLS" . | nindent 10 }}
           filters:
             - name: envoy.filters.network.http_connection_manager
               typed_config:
@@ -479,7 +479,7 @@ static_resources:
           address: 0.0.0.0
           port_value: {{ .Values.envoy.ports.inbound }}
       filter_chains:
-        - {{ include "envoy.downstreamTLS" . | indent 10 }}
+        - {{ include "envoy.downstreamTLS" . | nindent 10 }}
           filters:
             - name: envoy.filters.network.http_connection_manager
               typed_config:
