@@ -312,12 +312,18 @@ SHARED: outbound mTLS HTTP listener (toward another Envoy sidecar)
 ─────────────────────────────────────────────────────────────────────────────
 SHARED: "blocked" outbound listener — tests whitelist-violation behaviour.
 
-  dev  → TCP proxy to blocked-mock; app gets a response
-  qa   → network RBAC LOG action + forward to blocked-mock; access log shows violation
-  prod → network RBAC ALLOW with empty policies = deny all; connection reset
+  dev  → TCP proxy to blocked-mock; app gets a response (no enforcement)
+  qa   → network RBAC LOG action + forward to blocked-mock; violation logged
+  prod → listener is NOT created — the forbidden egress has no proxy at all,
+         so the app's connection to the local port is refused (fail closed).
+         This is the most reliable enforcement: the sidecar only opens
+         outbound listeners for whitelisted destinations.
 ─────────────────────────────────────────────────────────────────────────────
 */}}
 {{- define "envoy.blockedListener" -}}
+{{- if eq .Values.envoy.mode "prod" -}}
+# prod: no blocked listener — forbidden egress is not proxied (connection refused)
+{{- else }}
 - name: outbound_blocked
   address:
     socket_address:
@@ -325,29 +331,7 @@ SHARED: "blocked" outbound listener — tests whitelist-violation behaviour.
       port_value: {{ .Values.envoy.ports.outboundBlocked }}
   filter_chains:
     - filters:
-{{- if eq .Values.envoy.mode "prod" }}
-        # DENY-all RBAC rejects the connection before tcp_proxy runs. The
-        # tcp_proxy is still required so the filter chain has a terminal filter
-        # (a chain with only a non-terminal RBAC filter is malformed and lets
-        # traffic through). It is never reached: every connection is denied.
-        - name: envoy.filters.network.rbac
-          typed_config:
-            "@type": type.googleapis.com/envoy.extensions.filters.network.rbac.v3.RBAC
-            stat_prefix: "blocked_prod."
-            rules:
-              action: DENY
-              policies:
-                deny-all:
-                  permissions:
-                    - any: true
-                  principals:
-                    - any: true
-        - name: envoy.filters.network.tcp_proxy
-          typed_config:
-            "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
-            stat_prefix: blocked_prod_fwd
-            cluster: blocked_mock
-{{- else if eq .Values.envoy.mode "qa" }}
+{{- if eq .Values.envoy.mode "qa" }}
         - name: envoy.filters.network.rbac
           typed_config:
             "@type": type.googleapis.com/envoy.extensions.filters.network.rbac.v3.RBAC
@@ -371,6 +355,7 @@ SHARED: "blocked" outbound listener — tests whitelist-violation behaviour.
             "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
             stat_prefix: blocked_dev
             cluster: blocked_mock
+{{- end }}
 {{- end }}
 {{- end }}
 
