@@ -43,6 +43,13 @@ data:
         ssl_ciphers            HIGH:!aNULL:!MD5;
 
         location / {
+          # nginx proxies as HTTP/1.0 by default. Pod A's Envoy rejects HTTP/1.0
+          # with 426 Upgrade Required (accept_http_10 defaults to false), so force
+          # HTTP/1.1 upstream. Clearing Connection lets keepalive work cleanly.
+          # A real F5/HAProxy already speaks HTTP/1.1; this matches that behaviour.
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+
           # Forward the verified client cert CN downstream — this is what
           # HAProxy and Pod A Envoy will use for identity checks.
           proxy_set_header X-SSL-Client-CN   $ssl_client_cn;
