@@ -126,13 +126,20 @@ jobs:
           kubectl get events -n envoy-test \
             --sort-by='.lastTimestamp' | tail -30
 
-          echo ""
-          echo "════ logs for non-Running pods ═══════════════════════"
-          kubectl get pods -n envoy-test --no-headers \
-            | grep -v ' Running ' \
-            | awk '{print $1}' \
-            | while read pod; do
-                echo "--- $pod ---"
-                kubectl logs -n envoy-test "$pod" \
-                  --all-containers --tail=40 2>/dev/null || true
-              done
+      # On failure, trace the request hop-by-hop and dump every tier's logs.
+      - name: Diagnose smoke failure
+        if: failure()
+        run: |
+          echo "════ verbose curl to /health (shows HTTP code + which hop) ════"
+          kubectl exec -n envoy-test client -- sh -c '
+            curl -sS -o /dev/null -w "HTTP %{http_code}\n" \
+              --cert /certs/client.crt --key /certs/client.key --cacert /certs/ca.crt \
+              https://f5-sim.envoy-test.svc.cluster.local/health \
+              || echo "curl exit $?"' || true
+
+          for tier in f5-sim haproxy pod-a pod-b; do
+            echo ""
+            echo "════ logs: $tier ═════════════════════════════════════"
+            kubectl logs -n envoy-test -l "app=$tier" \
+              --all-containers --prefix --tail=50 2>/dev/null || true
+          done
