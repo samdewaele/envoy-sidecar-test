@@ -65,13 +65,13 @@ releases:
     createNamespace: false   # namespace is created by make certs (kubectl) before helmfile runs
     chart: ./helm
 
-    # Environment-specific values are already merged above via the
-    # environments block.  We re-state the base file here so helmfile
-    # can track it for drift detection.
-    # For openshift-* environments the overlay files are listed explicitly
-    # in the environments block above; the base file is enough here.
+    # Pass the merged environment values (assembled from the files listed in
+    # the environments block above) to the Helm release. The environments
+    # block alone does NOT pass values to the release — only this does — so
+    # this is what makes envoy.mode (dev/qa/prod) actually reach the chart.
+    # Works for every environment, including the openshift-* overlays.
     values:
-      - helm/values.yaml
+      - {{ .Values | toYaml | nindent 8 }}
 
     # Image is built locally and pushed to the kind registry.
     # Set TESTAPP_IMAGE in your shell before running helmfile, or override
