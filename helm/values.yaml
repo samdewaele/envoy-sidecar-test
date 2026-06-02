@@ -7,9 +7,9 @@
 # Global
 # ---------------------------------------------------------------------------
 global:
-  namespace: envoy-test
   imageRegistry: ""          # prefix for all images, e.g. "registry.mybank.internal/"
   imagePullPolicy: IfNotPresent
+  clusterDomain: cluster.local
 
   # Container UIDs.
   # Set to ~ (null) on OpenShift when the restricted SCC is active — it
@@ -19,13 +19,31 @@ global:
   appUID:   65534   # nobody; ignored on OpenShift
 
 # ---------------------------------------------------------------------------
+# Namespaces — one per component, to mirror a real multi-tenant cluster.
+# Every component's Service is reachable cross-namespace at
+#   <service>.<namespace>.svc.<clusterDomain>
+# ---------------------------------------------------------------------------
+namespaces:
+  f5:          f5
+  haproxy:     haproxy
+  apps:        apps          # pod-a, pod-b + their Envoy sidecars
+  gateway:     gateway       # the shared egress gateway
+  client:      client        # test client
+  kafka:       kafka
+  internalApi: internal-api
+  llmGateway:  llm-gateway
+  blocked:     blocked
+
+# ---------------------------------------------------------------------------
 # Envoy sidecar — shared settings
 # ---------------------------------------------------------------------------
 envoy:
-  # mode controls enforcement level:
-  #   dev  — sidecar present, all traffic allowed, no TLS enforced
-  #   qa   — mTLS on, whitelists evaluated but violations only LOGGED
-  #   prod — mTLS on, whitelists hard-enforced, violations DROPPED
+  # mode controls inbound RBAC enforcement level:
+  #   dev  — sidecar present, inbound RBAC filter not loaded
+  #   qa   — mTLS on, inbound whitelist evaluated but violations only LOGGED
+  #   prod — mTLS on, inbound whitelist hard-enforced, violations DROPPED
+  # mTLS is ALWAYS on in every mode. Egress authorization is enforced at the
+  # gateway (by client-cert CN), not in the sidecar.
   mode: dev
 
   image: envoyproxy/envoy:v1.31-latest
@@ -36,43 +54,81 @@ envoy:
     admin: 9901            # Envoy admin interface (localhost only — never exposed)
     health: 9902           # plain-HTTP health listener on 0.0.0.0 for kubelet probes
 
-    # Outbound localhost listeners — app connects to these instead of real addresses
-    outboundPodB:      19080
-    outboundKafka:     19092
-    outboundLLM:       14443
-    outboundSTS:       19093
-    outboundInternal:  19094
-    outboundBlocked:   19999   # "forbidden" target used to test violation behaviour
+    # Outbound localhost listeners — the app connects to these. Pod-B is a
+    # direct east-west hop; the rest are routed to the egress gateway by SNI.
+    outboundPodB:      19080   # direct sidecar→sidecar to Pod B
+    outboundKafka:     19092   # → gateway (SNI=kafka)
+    outboundLLM:       14443   # → gateway (SNI=llm-gateway)
+    outboundInternal:  19094   # → gateway (SNI=internal-api)
+    outboundBlocked:   19999   # → gateway (SNI=blocked) — no route, used to test blocking
 
+  # Per-pod identity certs. Pod A and Pod B now use DISTINCT certs so the
+  # gateway can authorize egress by client-cert CN.
   tls:
-    secretName: envoy-certs   # must contain: tls.crt, tls.key, ca.crt
+    secretNamePodA: envoy-certs-pod-a   # tls.crt (CN=pod-a), tls.key, ca.crt
+    secretNamePodB: envoy-certs-pod-b   # tls.crt (CN=pod-b), tls.key, ca.crt
     mountPath: /certs
 
   # JWT injection — Envoy signs every inbound request with an RS256 JWT so the
   # app container can verify the request really came through the sidecar.
-  # Private key (for signing) lives ONLY in the Envoy container.
-  # Public key (for verification) lives ONLY in the app container.
   jwt:
     enabled: true
-    tokenSecretName: envoy-jwt-token   # k8s Secret with jwt.token — mounted in Envoy
-    pubkeySecretName: app-jwt-pubkey   # k8s Secret with jwt.pub  — mounted in app
-    tokenMountPath: /jwt               # Envoy reads /jwt/jwt.token
-    pubkeyMountPath: /jwt-pubkey       # App reads  /jwt-pubkey/jwt.pub
-    headerName: X-Envoy-Internal-JWT   # header Envoy sets; app validates this
+    tokenSecretName: envoy-jwt-token
+    pubkeySecretName: app-jwt-pubkey
+    tokenMountPath: /jwt
+    pubkeyMountPath: /jwt-pubkey
+    headerName: X-Envoy-Internal-JWT
 
-  accessLogFormat: >
-    [%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%
-    %PROTOCOL%" %RESPONSE_CODE% %RESPONSE_FLAGS%
-    %BYTES_SENT% cn="%REQ(X-SSL-CLIENT-CN)%" shadow=%DYNAMIC_METADATA(envoy.filters.http.rbac:shadow_engine_result)%
+# ---------------------------------------------------------------------------
+# Egress gateway — a standalone Envoy that performs egress for the pods.
+#
+#   pod sidecar ──mTLS (SNI=<target>)──▶ gateway ──re-encrypt mTLS──▶ target
+#
+# The gateway is the single egress policy point. It blocks two ways:
+#   - no route:  SNI has no matching filter chain (e.g. "blocked")
+#   - CN denied: the calling pod's client-cert CN is not authorized for that SNI
+# ---------------------------------------------------------------------------
+gateway:
+  enabled: true
+  name: gateway
+  replicas: 1
+  image: envoyproxy/envoy:v1.31-latest
+
+  ports:
+    listen: 8443           # mTLS ingress from pod sidecars
+    admin: 9901            # localhost only
+    health: 9902           # 0.0.0.0 for kubelet probes
+
+  service:
+    port: 8443
+
+  tls:
+    secretName: gateway-certs   # tls.crt (CN=gateway), tls.key, ca.crt
+    mountPath: /certs
+
+  # Routing + per-CN authorization table.
+  # Each entry: an SNI the pods address, the real upstream it maps to, and the
+  # set of client-cert CNs allowed to use it. "blocked" is intentionally absent.
+  routes:
+    - sni: kafka
+      upstreamHost: kafka-mock
+      upstreamNamespace: kafka
+      upstreamPort: 9092
+      allowedCNs: ["pod-a", "pod-b"]
+    - sni: llm-gateway
+      upstreamHost: llm-gateway-mock
+      upstreamNamespace: llm-gateway
+      upstreamPort: 8080
+      allowedCNs: ["pod-a"]
+    - sni: internal-api
+      upstreamHost: internal-api-mock
+      upstreamNamespace: internal-api
+      upstreamPort: 8080
+      allowedCNs: ["pod-b"]
 
 # ---------------------------------------------------------------------------
 # f5-sim — nginx simulating the F5 BIG-IP
-#
-# Traffic flow:
-#   test-client ──mTLS──▶ f5-sim:443 ──HTTP+X-SSL-Client-CN──▶ haproxy:8080
-#
-# f5-sim terminates the external client TLS, extracts the client cert CN,
-# and forwards plain HTTP with the CN header to HAProxy.
+#   test-client ──mTLS──▶ f5-sim:443 ──mTLS+X-SSL-Client-CN──▶ haproxy:8443
 # ---------------------------------------------------------------------------
 f5Sim:
   enabled: true
@@ -85,33 +141,31 @@ f5Sim:
     nodePort: 30443      # access via https://localhost:30443 from the host machine
 
   tls:
-    secretName: f5-sim-certs   # contains: tls.crt, tls.key, ca.crt
+    secretName: f5-sim-certs
 
 # ---------------------------------------------------------------------------
 # HAProxy — re-encrypts from f5-sim toward Pod A's Envoy
-#
-# Traffic flow:
-#   f5-sim ──mTLS──▶ haproxy:8443 ──mTLS──▶ pod-a-service:8443
+#   f5-sim ──mTLS──▶ haproxy:8443 ──mTLS──▶ pod-a-service.apps:8443
 # ---------------------------------------------------------------------------
 haproxy:
   enabled: true
   image: haproxy:2.9-alpine
   replicas: 1
-  port: 8443             # HAProxy listens here for mTLS traffic from f5-sim
+  port: 8443
 
   tls:
-    secretName: haproxy-certs   # contains: haproxy.pem (cert+key bundle), ca.crt
+    secretName: haproxy-certs
 
 # ---------------------------------------------------------------------------
-# Pod A
+# Pod A — egress allowed to: pod-b (direct), kafka, llm-gateway
 # ---------------------------------------------------------------------------
 podA:
   name: pod-a
   replicas: 1
-  image: ""   # set to your testapp image, e.g. "localhost:5001/testapp:latest"
+  image: ""
 
   service:
-    port: 8443    # == envoy.ports.inbound
+    port: 8443
 
   inbound:
     allowedSourceCIDRs:
@@ -122,17 +176,11 @@ podA:
 
   outbound:
     podB:
-      address: pod-b-service
-      port: 8443        # Pod B's Envoy inbound port
-    kafka:
-      address: kafka-mock
-      port: 9092
-    llmGateway:
-      address: llm-gateway-mock
-      port: 8080
+      address: pod-b-service   # resolved to pod-b-service.<apps-ns>.svc.<domain>
+      port: 8443
 
 # ---------------------------------------------------------------------------
-# Pod B
+# Pod B — egress allowed to: kafka, internal-api (all via the gateway)
 # ---------------------------------------------------------------------------
 podB:
   name: pod-b
@@ -140,7 +188,7 @@ podB:
   image: ""
 
   service:
-    port: 8443    # == envoy.ports.inbound (Pod B also uses Envoy on 8443)
+    port: 8443
 
   inbound:
     allowedSourceCIDRs:
@@ -149,40 +197,20 @@ podB:
       - "pod-a"
     cnHeader: "X-SSL-Client-CN"
 
-  outbound:
-    kafka:
-      address: kafka-mock
-      port: 9092
-    sts:
-      address: sts-mock
-      port: 8080
-    internalAPI:
-      address: internal-api-mock
-      port: 8080
-
 # ---------------------------------------------------------------------------
 # NetworkPolicy
-#
-# Requires a CNI that supports NetworkPolicy (Calico, Cilium, Weave).
-# Kind's default CNI (kindnet) does NOT support it.
-# The Makefile installs Calico automatically when networkPolicy.enabled=true.
-#
-# What this adds on top of Envoy:
-#   - Hard-blocks unauthorized destinations at the kernel network level
-#   - Prevents apps from bypassing Envoy and calling external targets directly
-#   - Works regardless of which process (app or sidecar) initiates the connection
 # ---------------------------------------------------------------------------
 networkPolicy:
   enabled: true
 
 # ---------------------------------------------------------------------------
-# Mock targets
+# Mock targets — each in its own namespace
 # ---------------------------------------------------------------------------
 mocks:
   image: ""   # same testapp image, APP_ROLE=mock
 
   tls:
-    secretName: mock-certs   # contains: tls.crt, tls.key, ca.crt
+    secretName: mock-certs
     mountPath: /certs
 
   kafka:
@@ -190,10 +218,6 @@ mocks:
     tcpPort: 9092
 
   llmGateway:
-    enabled: true
-    httpPort: 8080
-
-  sts:
     enabled: true
     httpPort: 8080
 
@@ -212,4 +236,4 @@ client:
   enabled: true
   image: curlimages/curl:8.7.1
   tls:
-    secretName: client-certs   # contains: client.crt, client.key, ca.crt
+    secretName: client-certs

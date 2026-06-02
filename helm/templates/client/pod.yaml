@@ -1,11 +1,11 @@
 {{- if .Values.client.enabled }}
 # Long-running client pod — exec into it to fire test requests.
-# kubectl exec -n envoy-test -it client -- /bin/sh
+# kubectl exec -n client -it client -- /bin/sh
 apiVersion: v1
 kind: Pod
 metadata:
   name: client
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.client }}
   labels:
     app: client
 spec:
@@ -20,8 +20,8 @@ spec:
           mountPath: /certs
           readOnly: true
       env:
-        - name: HAPROXY_HOST
-          value: "haproxy.{{ .Values.global.namespace }}.svc.cluster.local"
+        - name: F5_HOST
+          value: "f5-sim.{{ .Values.namespaces.f5 }}.svc.{{ .Values.global.clusterDomain }}"
       resources:
         requests:
           cpu: 10m

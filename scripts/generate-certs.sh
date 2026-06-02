@@ -2,207 +2,133 @@
 # =============================================================================
 # generate-certs.sh
 #
-# Generates a self-signed CA and the leaf certificates needed by the toy stack:
+# Self-signed CA + leaf certs for the multi-namespace gateway topology, plus an
+# RS256 JWT keypair. Creates every namespace and distributes the secrets.
 #
-#   CN=test-client  →  client.crt / client.key
-#                      Presented by the test-client pod to f5-sim (the "external
-#                      client" in the mTLS handshake).
-#
-#   CN=f5-sim       →  f5-sim.crt / f5-sim.key
-#                      f5-sim's own TLS identity (the server cert the client sees).
-#
-#   CN=haproxy      →  haproxy.crt / haproxy.key  → haproxy.pem (combined)
-#                      HAProxy presents this to Pod A's Envoy during re-encrypt.
-#
-#   CN=pod-a        →  pod-a.crt / pod-a.key
-#                      Pod A's Envoy identity — presented to Pod B during mTLS.
-#
-#   CN=pod-b        →  pod-b.crt / pod-b.key
-#                      Pod B's Envoy identity.
-#
-# All certs are signed by the same CA so the whole chain trusts each other.
-#
-# Usage:
-#   ./scripts/generate-certs.sh [namespace]
-#   namespace defaults to "envoy-test"
+# Leaf certs (all signed by one CA):
+#   test-client   client identity to f5-sim
+#   f5-sim        f5-sim server cert
+#   haproxy       haproxy identity (bundled as haproxy.pem)
+#   pod-a         Pod A sidecar identity  (CN=pod-a — gateway authorizes by this)
+#   pod-b         Pod B sidecar identity  (CN=pod-b)
+#   gateway       egress gateway identity (CN=gateway)
+#   mock-target   shared cert for all mock targets (SANs across their namespaces)
 # =============================================================================
 set -euo pipefail
 
-NS="${1:-envoy-test}"
 OUT="certs"
+DOMAIN="cluster.local"
 mkdir -p "$OUT"
 
-echo "▶  Generating certificates in ./$OUT  (namespace: $NS)"
+# Namespaces — MUST match helm/values.yaml .namespaces
+NS_F5=f5
+NS_HAPROXY=haproxy
+NS_APPS=apps
+NS_GATEWAY=gateway
+NS_CLIENT=client
+NS_KAFKA=kafka
+NS_INTERNAL=internal-api
+NS_LLM=llm-gateway
+NS_BLOCKED=blocked
+ALL_NS="$NS_F5 $NS_HAPROXY $NS_APPS $NS_GATEWAY $NS_CLIENT $NS_KAFKA $NS_INTERNAL $NS_LLM $NS_BLOCKED"
+
+echo "▶  Generating certificates in ./$OUT"
 
 # ── CA ────────────────────────────────────────────────────────────────────────
 openssl req -x509 -newkey rsa:4096 -days 3650 -nodes \
-  -keyout "$OUT/ca.key" \
-  -out    "$OUT/ca.crt" \
-  -subj   "/CN=envoy-test-ca/O=TestOrg"
+  -keyout "$OUT/ca.key" -out "$OUT/ca.crt" \
+  -subj "/CN=envoy-test-ca/O=TestOrg" 2>/dev/null
 echo "   CA generated"
 
-# ── Helper: issue_cert <cn> <san_dns> <prefix> ────────────────────────────────
+# ── issue_cert <cn> <prefix> <subjectAltName> ─────────────────────────────────
 issue_cert() {
-  local cn="$1"
-  local san="$2"   # additional SAN DNS name (can be same as cn)
-  local pfx="$3"
-
+  local cn="$1" pfx="$2" san="$3"
   openssl req -newkey rsa:2048 -nodes \
-    -keyout "$OUT/${pfx}.key" \
-    -out    "$OUT/${pfx}.csr" \
-    -subj   "/CN=${cn}/O=TestOrg"
-
+    -keyout "$OUT/${pfx}.key" -out "$OUT/${pfx}.csr" \
+    -subj "/CN=${cn}/O=TestOrg" 2>/dev/null
   openssl x509 -req -days 825 \
-    -in      "$OUT/${pfx}.csr" \
-    -CA      "$OUT/ca.crt" \
-    -CAkey   "$OUT/ca.key" \
-    -CAcreateserial \
-    -out     "$OUT/${pfx}.crt" \
-    -extfile <(printf "subjectAltName=DNS:%s,DNS:%s,DNS:localhost" "$cn" "$san")
-
+    -in "$OUT/${pfx}.csr" -CA "$OUT/ca.crt" -CAkey "$OUT/ca.key" -CAcreateserial \
+    -out "$OUT/${pfx}.crt" -extfile <(printf "subjectAltName=%s" "$san") 2>/dev/null
   rm "$OUT/${pfx}.csr"
-  echo "   issued: CN=${cn}  SAN=${san}  →  ${pfx}.crt"
+  echo "   issued: CN=${cn}  →  ${pfx}.crt"
 }
 
-# ── Leaf certificates ─────────────────────────────────────────────────────────
-#
-# test-client: the external caller that connects to f5-sim with a client cert.
-issue_cert "test-client" "test-client" "client"
+issue_cert "test-client" "client"  "DNS:test-client,DNS:localhost"
+issue_cert "f5-sim"      "f5-sim"   "DNS:f5-sim,DNS:f5-sim.${NS_F5}.svc.${DOMAIN},DNS:localhost"
+issue_cert "haproxy"     "haproxy"  "DNS:haproxy,DNS:haproxy.${NS_HAPROXY}.svc.${DOMAIN},DNS:localhost"
+# Pod identity certs — first DNS SAN is the bare name the gateway RBAC matches on.
+issue_cert "pod-a"       "pod-a"    "DNS:pod-a,DNS:pod-a-service.${NS_APPS}.svc.${DOMAIN},DNS:localhost"
+issue_cert "pod-b"       "pod-b"    "DNS:pod-b,DNS:pod-b-service.${NS_APPS}.svc.${DOMAIN},DNS:localhost"
+# Gateway cert — service DNS plus the SNI routing tokens (harmless extra SANs).
+issue_cert "gateway"     "gateway"  "DNS:gateway,DNS:gateway.${NS_GATEWAY}.svc.${DOMAIN},DNS:kafka,DNS:llm-gateway,DNS:internal-api,DNS:localhost"
+# Mock cert — all mock service DNS names across their namespaces.
+issue_cert "mock-target" "mock" \
+  "DNS:mock-target,DNS:kafka-mock,DNS:kafka-mock.${NS_KAFKA}.svc.${DOMAIN},DNS:llm-gateway-mock,DNS:llm-gateway-mock.${NS_LLM}.svc.${DOMAIN},DNS:internal-api-mock,DNS:internal-api-mock.${NS_INTERNAL}.svc.${DOMAIN},DNS:blocked-mock,DNS:blocked-mock.${NS_BLOCKED}.svc.${DOMAIN},DNS:localhost"
 
-# f5-sim: the nginx pod presenting a server cert to the external client.
-issue_cert "f5-sim" "f5-sim.envoy-test.svc.cluster.local" "f5-sim"
-
-# haproxy: HAProxy presents this to Pod A's Envoy during the TLS re-encrypt.
-issue_cert "haproxy"  "haproxy.envoy-test.svc.cluster.local"  "haproxy"
-
-# pod-a: Envoy sidecar in Pod A. Presented to Pod B's Envoy over mTLS.
-issue_cert "pod-a" "pod-a-service.envoy-test.svc.cluster.local" "pod-a"
-
-# pod-b: Envoy sidecar in Pod B.
-issue_cert "pod-b" "pod-b-service.envoy-test.svc.cluster.local" "pod-b"
-
-# mock-target: shared cert for all mock target pods (kafka, llm-gateway, sts,
-# internal-api, blocked). All their service DNS names are listed as SANs so
-# Envoy's upstream TLS verification passes regardless of which mock it connects to.
-openssl req -newkey rsa:2048 -nodes \
-  -keyout "$OUT/mock.key" \
-  -out    "$OUT/mock.csr" \
-  -subj   "/CN=mock-target/O=TestOrg"
-
-openssl x509 -req -days 825 \
-  -in      "$OUT/mock.csr" \
-  -CA      "$OUT/ca.crt" \
-  -CAkey   "$OUT/ca.key" \
-  -CAcreateserial \
-  -out     "$OUT/mock.crt" \
-  -extfile <(printf "subjectAltName=DNS:mock-target,DNS:kafka-mock,DNS:kafka-mock.envoy-test.svc.cluster.local,DNS:llm-gateway-mock,DNS:llm-gateway-mock.envoy-test.svc.cluster.local,DNS:sts-mock,DNS:sts-mock.envoy-test.svc.cluster.local,DNS:internal-api-mock,DNS:internal-api-mock.envoy-test.svc.cluster.local,DNS:blocked-mock,DNS:blocked-mock.envoy-test.svc.cluster.local,DNS:localhost")
-
-rm "$OUT/mock.csr"
-echo "   issued: CN=mock-target (all mock service SANs)  →  mock.crt"
-
-# HAProxy needs cert+key as a single PEM bundle
+# HAProxy needs cert+key as one PEM bundle
 cat "$OUT/haproxy.crt" "$OUT/haproxy.key" > "$OUT/haproxy.pem"
 
+# ── JWT RS256 keypair + pre-signed token ──────────────────────────────────────
+echo "▶  Generating JWT RS256 keypair + token"
+openssl genrsa -out "$OUT/jwt.key" 2048 2>/dev/null
+openssl rsa -in "$OUT/jwt.key" -pubout -out "$OUT/jwt.pub" 2>/dev/null
+b64url() { openssl base64 -e -A | tr '+/' '-_' | tr -d '='; }
+HDR=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | b64url)
+EXP=$(( $(date +%s) + 3153600000 ))
+PAY=$(printf '%s' "{\"iss\":\"envoy-sidecar\",\"sub\":\"envoy-internal\",\"exp\":${EXP}}" | b64url)
+SIG=$(printf '%s' "${HDR}.${PAY}" | openssl dgst -sha256 -sign "$OUT/jwt.key" -binary | b64url)
+printf '%s' "${HDR}.${PAY}.${SIG}" > "$OUT/jwt.token"
+
+# ── Namespaces ─────────────────────────────────────────────────────────────────
 echo ""
-echo "▶  Loading Kubernetes secrets into namespace: $NS"
+echo "▶  Creating namespaces"
+for ns in $ALL_NS; do
+  kubectl get namespace "$ns" >/dev/null 2>&1 || kubectl create namespace "$ns"
+done
 
+# ── Secret helpers ──────────────────────────────────────────────────────────────
+mk_tls_secret() {  # <secret> <namespace> <cert-prefix>
+  kubectl create secret generic "$1" --namespace="$2" \
+    --from-file=tls.crt="$OUT/$3.crt" \
+    --from-file=tls.key="$OUT/$3.key" \
+    --from-file=ca.crt="$OUT/ca.crt" \
+    --dry-run=client -o yaml | kubectl apply -f -
+}
 
-kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS"
+echo ""
+echo "▶  Loading secrets"
 
-# ── f5-sim-certs ─────────────────────────────────────────────────────────────
-# f5-sim needs its own server cert + CA to verify client certs
-kubectl create secret generic f5-sim-certs \
-  --namespace="$NS" \
-  --from-file=tls.crt="$OUT/f5-sim.crt" \
-  --from-file=tls.key="$OUT/f5-sim.key" \
-  --from-file=ca.crt="$OUT/ca.crt" \
-  --dry-run=client -o yaml | kubectl apply -f -
+mk_tls_secret f5-sim-certs       "$NS_F5"       f5-sim
+mk_tls_secret envoy-certs-pod-a  "$NS_APPS"     pod-a
+mk_tls_secret envoy-certs-pod-b  "$NS_APPS"     pod-b
+mk_tls_secret gateway-certs      "$NS_GATEWAY"  gateway
 
-# ── haproxy-certs ─────────────────────────────────────────────────────────────
-# HAProxy needs its combined PEM + CA to verify Pod A's Envoy cert
-kubectl create secret generic haproxy-certs \
-  --namespace="$NS" \
+# mock cert is shared across all four mock namespaces
+mk_tls_secret mock-certs "$NS_KAFKA"    mock
+mk_tls_secret mock-certs "$NS_LLM"      mock
+mk_tls_secret mock-certs "$NS_INTERNAL" mock
+mk_tls_secret mock-certs "$NS_BLOCKED"  mock
+
+# haproxy: PEM bundle + CA
+kubectl create secret generic haproxy-certs --namespace="$NS_HAPROXY" \
   --from-file=haproxy.pem="$OUT/haproxy.pem" \
   --from-file=ca.crt="$OUT/ca.crt" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# ── envoy-certs ───────────────────────────────────────────────────────────────
-# Envoy sidecars in both pods share this secret for simplicity.
-# In production: issue separate certs per pod (different CN / SAN).
-# Pod A's cert is used here; swap pod-b.crt/key for the Pod B deployment
-# if you want distinct identities per pod.
-kubectl create secret generic envoy-certs \
-  --namespace="$NS" \
-  --from-file=tls.crt="$OUT/pod-a.crt" \
-  --from-file=tls.key="$OUT/pod-a.key" \
-  --from-file=ca.crt="$OUT/ca.crt" \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-# ── client-certs ─────────────────────────────────────────────────────────────
-# The test-client pod uses these to authenticate to f5-sim
-kubectl create secret generic client-certs \
-  --namespace="$NS" \
+# client: client.crt/key/ca
+kubectl create secret generic client-certs --namespace="$NS_CLIENT" \
   --from-file=client.crt="$OUT/client.crt" \
   --from-file=client.key="$OUT/client.key" \
   --from-file=ca.crt="$OUT/ca.crt" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# ── mock-certs ────────────────────────────────────────────────────────────────
-# Shared by all mock target pods (kafka-mock, llm-gateway-mock, sts-mock,
-# internal-api-mock, blocked-mock). Envoy verifies this cert against the CA
-# when making outbound TLS connections to those targets.
-kubectl create secret generic mock-certs \
-  --namespace="$NS" \
-  --from-file=tls.crt="$OUT/mock.crt" \
-  --from-file=tls.key="$OUT/mock.key" \
-  --from-file=ca.crt="$OUT/ca.crt" \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-# ── JWT RS256 keypair + pre-signed token ──────────────────────────────────────
-#
-# Private key → mounted ONLY in the Envoy sidecar (envoy-jwt-token secret).
-# Public  key → mounted ONLY in the app container  (app-jwt-pubkey  secret).
-#
-# The Lua filter in Envoy reads the token from /jwt/jwt.token and injects it
-# as the X-Envoy-Internal-JWT request header.  The app validates it with the
-# public key.  No external JWT library is required on either side.
-echo ""
-echo "▶  Generating JWT RS256 keypair"
-
-openssl genrsa -out "$OUT/jwt.key" 2048 2>/dev/null
-openssl rsa    -in  "$OUT/jwt.key" -pubout -out "$OUT/jwt.pub" 2>/dev/null
-echo "   RSA keypair: jwt.key / jwt.pub"
-
-echo "▶  Minting RS256 JWT token"
-
-# base64url-encode stdin (no padding, no line-wraps)
-b64url() { openssl base64 -e -A | tr '+/' '-_' | tr -d '='; }
-
-HDR=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | b64url)
-# Expiry: now + 100 years (effectively permanent for this test environment)
-EXP=$(( $(date +%s) + 3153600000 ))
-PAY=$(printf '%s' "{\"iss\":\"envoy-sidecar\",\"sub\":\"envoy-internal\",\"exp\":${EXP}}" | b64url)
-SIG=$(printf '%s' "${HDR}.${PAY}" | openssl dgst -sha256 -sign "$OUT/jwt.key" -binary | b64url)
-TOKEN="${HDR}.${PAY}.${SIG}"
-printf '%s' "$TOKEN" > "$OUT/jwt.token"
-echo "   JWT token written to $OUT/jwt.token  (exp epoch: ${EXP})"
-
-# ── envoy-jwt-token secret ─────────────────────────────────────────────────
-# Mounted read-only into the Envoy sidecar at /jwt.
-# The Lua filter reads /jwt/jwt.token and injects it as a Bearer header.
-kubectl create secret generic envoy-jwt-token \
-  --namespace="$NS" \
+# JWT: private token in the apps namespace (Envoy reads it), public key likewise (app verifies)
+kubectl create secret generic envoy-jwt-token --namespace="$NS_APPS" \
   --from-file=jwt.token="$OUT/jwt.token" \
   --dry-run=client -o yaml | kubectl apply -f -
-
-# ── app-jwt-pubkey secret ─────────────────────────────────────────────────
-# Mounted read-only into the app container at /jwt-pubkey.
-# The app validates JWT signatures with /jwt-pubkey/jwt.pub.
-kubectl create secret generic app-jwt-pubkey \
-  --namespace="$NS" \
+kubectl create secret generic app-jwt-pubkey --namespace="$NS_APPS" \
   --from-file=jwt.pub="$OUT/jwt.pub" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 echo ""
-echo "✅  Done. Secrets in namespace '$NS':"
-kubectl get secrets -n "$NS" --no-headers | grep -E "f5-sim-certs|haproxy-certs|envoy-certs|client-certs|mock-certs|envoy-jwt-token|app-jwt-pubkey"
+echo "✅  Done. Namespaces and secrets created."

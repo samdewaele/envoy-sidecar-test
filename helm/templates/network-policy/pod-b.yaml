@@ -1,9 +1,15 @@
 {{- if .Values.networkPolicy.enabled }}
+{{/*
+Pod B NetworkPolicy (namespace: apps).
+Ingress: only Pod A (same namespace) may reach the Envoy inbound port.
+Egress:  the egress gateway + DNS only. Pod B reaches kafka/internal-api
+         exclusively through the gateway.
+*/}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: pod-b-netpol
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.apps }}
   labels:
     app: pod-b
 spec:
@@ -15,11 +21,6 @@ spec:
     - Egress
 
   ingress:
-    # Only Pod A may reach Pod B's Envoy inbound port.
-    # Even if the app in Pod A tries to bypass its own Envoy and call Pod B
-    # directly, NetworkPolicy allows it (same pod CIDR) — but Pod B's Envoy
-    # will reject it because require_client_certificate: true means it needs
-    # a valid mTLS cert. That cert is only in the Envoy sidecar, not the app.
     - from:
         - podSelector:
             matchLabels:
@@ -29,37 +30,22 @@ spec:
           protocol: TCP
 
   egress:
-    # ── Cluster DNS ───────────────────────────────────────────────────────────
+    # Cluster DNS
     - ports:
         - port: 53
           protocol: UDP
         - port: 53
           protocol: TCP
 
-    # ── Kafka ─────────────────────────────────────────────────────────────────
+    # Egress gateway — the ONLY path to external systems
     - to:
-        - podSelector:
+        - namespaceSelector:
             matchLabels:
-              app: kafka-mock
-      ports:
-        - port: {{ .Values.mocks.kafka.tcpPort }}
-          protocol: TCP
-
-    # ── STS ───────────────────────────────────────────────────────────────────
-    - to:
-        - podSelector:
+              kubernetes.io/metadata.name: {{ .Values.namespaces.gateway }}
+          podSelector:
             matchLabels:
-              app: sts-mock
+              app: {{ .Values.gateway.name }}
       ports:
-        - port: {{ .Values.mocks.sts.httpPort }}
-          protocol: TCP
-
-    # ── Internal API ──────────────────────────────────────────────────────────
-    - to:
-        - podSelector:
-            matchLabels:
-              app: internal-api-mock
-      ports:
-        - port: {{ .Values.mocks.internalAPI.httpPort }}
+        - port: {{ .Values.gateway.ports.listen }}
           protocol: TCP
 {{- end }}

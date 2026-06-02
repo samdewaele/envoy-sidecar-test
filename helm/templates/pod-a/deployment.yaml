@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: pod-a
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.apps }}
   labels:
     app: pod-a
 spec:
@@ -92,6 +92,9 @@ spec:
               value: "localhost:{{ .Values.envoy.ports.outboundKafka }}"
             - name: LLM_ADDR
               value: "localhost:{{ .Values.envoy.ports.outboundLLM }}"
+            # internal-api is wired so we can prove the gateway DENIES pod-a by CN
+            - name: INTERNAL_API_ADDR
+              value: "localhost:{{ .Values.envoy.ports.outboundInternal }}"
             - name: BLOCKED_ADDR
               value: "localhost:{{ .Values.envoy.ports.outboundBlocked }}"
             {{- if .Values.envoy.jwt.enabled }}
@@ -143,7 +146,7 @@ spec:
             name: envoy-config-pod-a
         - name: envoy-certs
           secret:
-            secretName: {{ .Values.envoy.tls.secretName }}
+            secretName: {{ .Values.envoy.tls.secretNamePodA }}
         {{- if .Values.envoy.jwt.enabled }}
         - name: envoy-jwt-token
           secret:

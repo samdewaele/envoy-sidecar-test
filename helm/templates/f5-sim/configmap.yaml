@@ -11,7 +11,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: f5-sim-config
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.f5 }}
 data:
   nginx.conf: |
     events {
@@ -58,7 +58,7 @@ data:
           proxy_set_header Host              $host;
 
           # ── Upstream (f5-sim → haproxy): mTLS ───────────────────────────
-          proxy_pass https://haproxy.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.haproxy.port }};
+          proxy_pass https://haproxy.{{ .Values.namespaces.haproxy }}.svc.{{ .Values.global.clusterDomain }}:{{ .Values.haproxy.port }};
 
           # f5-sim presents its own cert to HAProxy
           proxy_ssl_certificate      /certs/tls.crt;
@@ -69,7 +69,7 @@ data:
           proxy_ssl_verify              on;
           proxy_ssl_verify_depth        2;
           proxy_ssl_server_name         on;
-          proxy_ssl_name                haproxy.{{ .Values.global.namespace }}.svc.cluster.local;
+          proxy_ssl_name                haproxy.{{ .Values.namespaces.haproxy }}.svc.{{ .Values.global.clusterDomain }};
 
           proxy_connect_timeout 5s;
           proxy_read_timeout    30s;

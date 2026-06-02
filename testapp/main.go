@@ -288,6 +288,7 @@ func registerPodA(mux *http.ServeMux, clientTLS *tls.Config) {
 	podBAddr := getenv("POD_B_ADDR", "localhost:19080")
 	kafkaAddr := getenv("KAFKA_ADDR", "localhost:19092")
 	llmAddr := getenv("LLM_ADDR", "localhost:14443")
+	internalAddr := getenv("INTERNAL_API_ADDR", "localhost:19094")
 	blockedAddr := getenv("BLOCKED_ADDR", "localhost:19999")
 
 	scheme := "https"
@@ -295,6 +296,7 @@ func registerPodA(mux *http.ServeMux, clientTLS *tls.Config) {
 		scheme = "http"
 	}
 
+	// Allowed: pod-b (direct), kafka, llm-gateway (via gateway)
 	mux.HandleFunc("/call-b", func(w http.ResponseWriter, r *http.Request) {
 		out, err := callHTTP("pod-a→pod-b", scheme+"://"+podBAddr+"/echo", clientTLS)
 		respond(w, out, err)
@@ -307,12 +309,17 @@ func registerPodA(mux *http.ServeMux, clientTLS *tls.Config) {
 		out, err := callHTTP("pod-a→llm-gateway", scheme+"://"+llmAddr+"/echo", clientTLS)
 		respond(w, out, err)
 	})
+	// Should be DENIED by the gateway (pod-a CN not authorized for internal-api)
+	mux.HandleFunc("/call-internal", func(w http.ResponseWriter, r *http.Request) {
+		out, err := callHTTP("pod-a→internal-api", scheme+"://"+internalAddr+"/echo", clientTLS)
+		respond(w, out, err)
+	})
+	// Should be DENIED by the gateway (no route for SNI=blocked)
 	mux.HandleFunc("/call-blocked", func(w http.ResponseWriter, r *http.Request) {
 		out, err := callHTTP("pod-a→BLOCKED", scheme+"://"+blockedAddr+"/echo", clientTLS)
 		respond(w, out, err)
 	})
 	mux.HandleFunc("/call-all", func(w http.ResponseWriter, r *http.Request) {
-		// Summary endpoint: always 200, individual outcomes printed in the body.
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintln(w, "=== pod-a outbound summary ===")
 		out, _ := callHTTP("pod-a→pod-b", scheme+"://"+podBAddr+"/echo", clientTLS)
@@ -321,15 +328,17 @@ func registerPodA(mux *http.ServeMux, clientTLS *tls.Config) {
 		fmt.Fprintln(w, out)
 		out, _ = callHTTP("pod-a→llm", scheme+"://"+llmAddr+"/echo", clientTLS)
 		fmt.Fprintln(w, out)
-		out, _ = callHTTP("pod-a→BLOCKED", scheme+"://"+blockedAddr+"/echo", clientTLS)
+		out, _ = callHTTP("pod-a→internal(deny)", scheme+"://"+internalAddr+"/echo", clientTLS)
+		fmt.Fprintln(w, out)
+		out, _ = callHTTP("pod-a→BLOCKED(deny)", scheme+"://"+blockedAddr+"/echo", clientTLS)
 		fmt.Fprintln(w, out)
 	})
 }
 
 func registerPodB(mux *http.ServeMux, clientTLS *tls.Config) {
 	kafkaAddr := getenv("KAFKA_ADDR", "localhost:19092")
-	stsAddr := getenv("STS_ADDR", "localhost:19093")
 	internalAPIAddr := getenv("INTERNAL_API_ADDR", "localhost:19094")
+	llmAddr := getenv("LLM_ADDR", "localhost:14443")
 	blockedAddr := getenv("BLOCKED_ADDR", "localhost:19999")
 
 	scheme := "https"
@@ -337,33 +346,35 @@ func registerPodB(mux *http.ServeMux, clientTLS *tls.Config) {
 		scheme = "http"
 	}
 
+	// Allowed: kafka, internal-api (via gateway)
 	mux.HandleFunc("/call-kafka", func(w http.ResponseWriter, r *http.Request) {
 		out, err := callTCP("pod-b→kafka", kafkaAddr, clientTLS)
-		respond(w, out, err)
-	})
-	mux.HandleFunc("/call-sts", func(w http.ResponseWriter, r *http.Request) {
-		out, err := callHTTP("pod-b→sts", scheme+"://"+stsAddr+"/echo", clientTLS)
 		respond(w, out, err)
 	})
 	mux.HandleFunc("/call-internal", func(w http.ResponseWriter, r *http.Request) {
 		out, err := callHTTP("pod-b→internal-api", scheme+"://"+internalAPIAddr+"/echo", clientTLS)
 		respond(w, out, err)
 	})
+	// Should be DENIED by the gateway (pod-b CN not authorized for llm-gateway)
+	mux.HandleFunc("/call-llm", func(w http.ResponseWriter, r *http.Request) {
+		out, err := callHTTP("pod-b→llm-gateway", scheme+"://"+llmAddr+"/echo", clientTLS)
+		respond(w, out, err)
+	})
+	// Should be DENIED by the gateway (no route for SNI=blocked)
 	mux.HandleFunc("/call-blocked", func(w http.ResponseWriter, r *http.Request) {
 		out, err := callHTTP("pod-b→BLOCKED", scheme+"://"+blockedAddr+"/echo", clientTLS)
 		respond(w, out, err)
 	})
 	mux.HandleFunc("/call-all", func(w http.ResponseWriter, r *http.Request) {
-		// Summary endpoint: always 200, individual outcomes printed in the body.
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintln(w, "=== pod-b outbound summary ===")
 		out, _ := callTCP("pod-b→kafka", kafkaAddr, clientTLS)
 		fmt.Fprintln(w, out)
-		out, _ = callHTTP("pod-b→sts", scheme+"://"+stsAddr+"/echo", clientTLS)
-		fmt.Fprintln(w, out)
 		out, _ = callHTTP("pod-b→internal-api", scheme+"://"+internalAPIAddr+"/echo", clientTLS)
 		fmt.Fprintln(w, out)
-		out, _ = callHTTP("pod-b→BLOCKED", scheme+"://"+blockedAddr+"/echo", clientTLS)
+		out, _ = callHTTP("pod-b→llm(deny)", scheme+"://"+llmAddr+"/echo", clientTLS)
+		fmt.Fprintln(w, out)
+		out, _ = callHTTP("pod-b→BLOCKED(deny)", scheme+"://"+blockedAddr+"/echo", clientTLS)
 		fmt.Fprintln(w, out)
 	})
 }

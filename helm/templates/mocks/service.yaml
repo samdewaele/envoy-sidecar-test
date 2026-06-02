@@ -3,7 +3,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: kafka-mock
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.kafka }}
 spec:
   selector:
     app: kafka-mock
@@ -21,7 +21,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: llm-gateway-mock
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.llmGateway }}
 spec:
   selector:
     app: llm-gateway-mock
@@ -31,27 +31,12 @@ spec:
       targetPort: {{ .Values.mocks.llmGateway.httpPort }}
 ---
 {{- end }}
-{{- if .Values.mocks.sts.enabled }}
-apiVersion: v1
-kind: Service
-metadata:
-  name: sts-mock
-  namespace: {{ .Values.global.namespace }}
-spec:
-  selector:
-    app: sts-mock
-  ports:
-    - name: http
-      port: {{ .Values.mocks.sts.httpPort }}
-      targetPort: {{ .Values.mocks.sts.httpPort }}
----
-{{- end }}
 {{- if .Values.mocks.internalAPI.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
   name: internal-api-mock
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.internalApi }}
 spec:
   selector:
     app: internal-api-mock
@@ -66,7 +51,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: blocked-mock
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.blocked }}
 spec:
   selector:
     app: blocked-mock

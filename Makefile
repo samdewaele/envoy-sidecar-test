@@ -21,7 +21,8 @@
 ###############################################################################
 
 CLUSTER        := envoy-sidecar-test
-NS             := envoy-test
+NS_CLIENT      := client
+NS_APPS        := apps
 IMAGE_NAME     := testapp
 IMAGE_TAG      := latest
 REGISTRY       := localhost:5001
@@ -33,8 +34,8 @@ CALICO_URL     := https://raw.githubusercontent.com/projectcalico/calico/$(CALIC
 
 .PHONY: help cluster calico registry build push certs plugins \
         dev qa prod \
-        test-dev test-qa test-prod \
-        logs-f5 logs-haproxy logs-a logs-b \
+        egress-matrix test-dev test-qa test-prod \
+        logs-f5 logs-haproxy logs-a logs-b logs-gw \
         status down clean
 
 # ── Help ─────────────────────────────────────────────────────────────────────
@@ -115,7 +116,7 @@ push: build
 
 certs:
 	chmod +x scripts/generate-certs.sh
-	./scripts/generate-certs.sh $(NS)
+	./scripts/generate-certs.sh
 
 # ── Deploy ───────────────────────────────────────────────────────────────────
 # helmfile merges base values + environment values automatically.
@@ -141,87 +142,87 @@ prod: push certs plugins
 	@echo "    Violations: BLOCKED — /call-blocked will return connection reset"
 
 # ── Tests ────────────────────────────────────────────────────────────────────
-# All requests go from the test-client pod through f5-sim (NodePort :30443).
-# The client pod has its certs mounted at /certs.
-# mTLS is ALWAYS on (every mode), so every test presents the client cert.
-# Modes differ only in how the whitelist is enforced, not in transport.
+# Pod A is exercised through the real ingress chain (client → f5 → haproxy →
+# pod-a). Pod B's egress is exercised by exec'ing into its app container and
+# hitting the sidecar's local egress ports (the client cannot reach pod-b).
+#
+# The egress gateway enforces authz in EVERY mode (it is a separate control
+# plane from the sidecar's inbound RBAC), so the egress matrix is mode-agnostic.
+# Only the inbound behaviour differs by mode (prod additionally rejects a
+# missing client cert).
 
-_curl_mtls = kubectl exec -n $(NS) client -- curl -sf --max-time 5 \
-               --cert /certs/client.crt \
-               --key  /certs/client.key \
-               --cacert /certs/ca.crt
+F5 := https://f5-sim.f5.svc.cluster.local
 
-# f5-sim internal hostname as seen from the client pod
-F5 := https://f5-sim.$(NS).svc.cluster.local
+_curl_mtls = kubectl exec -n $(NS_CLIENT) client -- curl -sf --max-time 8 \
+               --cert /certs/client.crt --key /certs/client.key --cacert /certs/ca.crt
 
-test-dev:
+# exec into the pod-b app container (to reach its sidecar's local egress ports)
+_execb = kubectl exec -n $(NS_APPS) -c app \
+           $$(kubectl get pod -n $(NS_APPS) -l app=pod-b -o jsonpath='{.items[0].metadata.name}') --
+
+# Shared egress authorization matrix — identical in dev/qa/prod.
+egress-matrix:
+	@echo "── Pod A egress (client → f5 → pod-a) ──────────────────────────"
+	$(_curl_mtls) $(F5)/call-b     && echo "  ✅ pod-a → pod-b (direct)"
+	$(_curl_mtls) $(F5)/call-kafka && echo "  ✅ pod-a → kafka (gateway)"
+	$(_curl_mtls) $(F5)/call-llm   && echo "  ✅ pod-a → llm-gateway (gateway)"
+	@echo "→ pod-a → internal-api must be DENIED (gateway: CN not authorized)"
+	@if $(_curl_mtls) $(F5)/call-internal >/dev/null 2>&1; then echo "  ❌ UNEXPECTED: allowed"; exit 1; else echo "  ✅ denied by CN"; fi
+	@echo "→ pod-a → blocked must be DENIED (gateway: no route)"
+	@if $(_curl_mtls) $(F5)/call-blocked >/dev/null 2>&1; then echo "  ❌ UNEXPECTED: allowed"; exit 1; else echo "  ✅ denied (no route)"; fi
+	@echo "── Pod B egress (exec → sidecar local egress ports) ────────────"
+	@if $(_execb) curl -sf --max-time 8 http://localhost:19094/echo >/dev/null 2>&1; then echo "  ✅ pod-b → internal-api (gateway)"; else echo "  ❌ pod-b → internal-api should be allowed"; exit 1; fi
+	@echo "→ pod-b → llm-gateway must be DENIED (gateway: CN not authorized)"
+	@if $(_execb) curl -sf --max-time 8 http://localhost:14443/echo >/dev/null 2>&1; then echo "  ❌ UNEXPECTED: allowed"; exit 1; else echo "  ✅ denied by CN"; fi
+	@echo "→ pod-b → blocked must be DENIED (gateway: no route)"
+	@if $(_execb) curl -sf --max-time 8 http://localhost:19999/echo >/dev/null 2>&1; then echo "  ❌ UNEXPECTED: allowed"; exit 1; else echo "  ✅ denied (no route)"; fi
+
+test-dev: egress-matrix
 	@echo "\n════ DEV smoke test ════"
-	@echo "→ health check via f5-sim"
-	$(_curl_mtls) $(F5)/health && echo " ✅"
-	@echo "→ pod-a calls pod-b"
-	$(_curl_mtls) $(F5)/call-b && echo " ✅"
-	@echo "→ pod-a calls kafka"
-	$(_curl_mtls) $(F5)/call-kafka && echo " ✅"
-	@echo "→ pod-a calls llm-gateway"
-	$(_curl_mtls) $(F5)/call-llm && echo " ✅"
-	@echo "→ /call-blocked (should SUCCEED in DEV — no enforcement)"
-	$(_curl_mtls) $(F5)/call-blocked && echo " ✅ (expected: passed through)"
-	@echo "\n✅  DEV: all paths open"
+	$(_curl_mtls) $(F5)/health && echo "  ✅ health via f5 (inbound RBAC not loaded)"
+	@echo "\n✅  DEV passed"
 
-test-qa:
+test-qa: egress-matrix
 	@echo "\n════ QA smoke test ════"
-	@echo "→ all legitimate calls (with mTLS client cert)"
-	$(_curl_mtls) $(F5)/call-all
-	@echo ""
-	@echo "→ /call-blocked (must SUCCEED in QA — logged, not blocked)"
-	$(_curl_mtls) $(F5)/call-blocked && echo " ✅ (passed — expected in QA)"
-	@echo ""
-	@echo "→ Envoy access log (look for shadow_result=DENY on the blocked call):"
-	kubectl logs -n $(NS) -l app=pod-a -c envoy --tail=10
-	@echo "\n✅  QA: violations logged, nothing blocked"
+	$(_curl_mtls) $(F5)/health && echo "  ✅ health via f5 (inbound RBAC shadow-only)"
+	@echo "→ inbound access log (shadow_result on pod-a):"
+	kubectl logs -n $(NS_APPS) -l app=pod-a -c envoy --tail=10 || true
+	@echo "\n✅  QA passed"
 
-test-prod:
+test-prod: egress-matrix
 	@echo "\n════ PROD smoke test ════"
-	@echo "→ allowed paths (must succeed)"
-	$(_curl_mtls) $(F5)/call-b    && echo " ✅ pod-b"
-	$(_curl_mtls) $(F5)/call-kafka  && echo " ✅ kafka"
-	$(_curl_mtls) $(F5)/call-llm    && echo " ✅ llm-gateway"
-	@echo ""
-	@echo "→ /call-blocked (must FAIL — Envoy resets egress, app returns 502)"
-	@if $(_curl_mtls) $(F5)/call-blocked >/dev/null 2>&1; then \
-	  echo " ❌ UNEXPECTED: blocked egress succeeded"; exit 1; \
-	else echo " ✅ blocked as expected (non-2xx)"; fi
-	@echo ""
+	$(_curl_mtls) $(F5)/health && echo "  ✅ health via f5 (inbound RBAC enforced, CN=test-client)"
 	@echo "→ Rejection without client cert (must fail the mTLS handshake)"
-	@if kubectl exec -n $(NS) client -- \
-	     curl -sf --max-time 5 --cacert /certs/ca.crt $(F5)/health >/dev/null 2>&1; then \
-	  echo " ❌ UNEXPECTED: accepted without client cert"; exit 1; \
-	else echo " ✅ rejected without client cert"; fi
-	@echo "\n✅  PROD: whitelist enforced"
+	@if kubectl exec -n $(NS_CLIENT) client -- \
+	     curl -sf --max-time 8 --cacert /certs/ca.crt $(F5)/health >/dev/null 2>&1; then \
+	  echo "  ❌ UNEXPECTED: accepted without client cert"; exit 1; \
+	else echo "  ✅ rejected without client cert"; fi
+	@echo "\n✅  PROD passed"
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
 
 logs-f5:
-	kubectl logs -n $(NS) -l app=f5-sim -f
+	kubectl logs -n f5 -l app=f5-sim -f
 
 logs-haproxy:
-	kubectl logs -n $(NS) -l app=haproxy -f
+	kubectl logs -n haproxy -l app=haproxy -f
 
 logs-a:
-	kubectl logs -n $(NS) -l app=pod-a -c envoy -f
+	kubectl logs -n $(NS_APPS) -l app=pod-a -c envoy -f
 
 logs-b:
-	kubectl logs -n $(NS) -l app=pod-b -c envoy -f
+	kubectl logs -n $(NS_APPS) -l app=pod-b -c envoy -f
+
+logs-gw:
+	kubectl logs -n gateway -l app=gateway -f
 
 # ── Status ───────────────────────────────────────────────────────────────────
 
 status:
-	@echo "\n── Pods ──"
-	kubectl get pods -n $(NS) -o wide
-	@echo "\n── Services ──"
-	kubectl get svc -n $(NS)
+	@echo "\n── Pods (all namespaces) ──"
+	kubectl get pods -A -o wide | grep -E 'NAME|f5|haproxy|apps|gateway|client|kafka|internal-api|llm-gateway|blocked' || true
 	@echo "\n── NetworkPolicies ──"
-	kubectl get networkpolicy -n $(NS)
+	kubectl get networkpolicy -A
 
 # ── Teardown ─────────────────────────────────────────────────────────────────
 

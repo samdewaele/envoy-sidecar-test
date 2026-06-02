@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: haproxy
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.haproxy }}
   labels:
     app: haproxy
 spec:

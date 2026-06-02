@@ -3,7 +3,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: f5-sim
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.f5 }}
   labels:
     app: f5-sim
 spec:
