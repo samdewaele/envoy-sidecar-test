@@ -74,6 +74,22 @@ spec:
         - port: {{ .Values.mocks.llmGateway.httpPort }}
           protocol: TCP
 
+    # ── Blocked mock ───────────────────────────────────────────────────────────
+    # Reachable at the network layer ON PURPOSE: the /call-blocked test
+    # demonstrates the *Envoy RBAC* enforcement layer, which the dev/qa/prod
+    # modes control (dev passes, qa logs, prod resets the connection).
+    # If NetworkPolicy dropped it here, the kernel would block it in every mode
+    # and the Envoy-layer behaviour would never be observable.
+    # The NetworkPolicy layer itself is demonstrated separately: sts-mock and
+    # internal-api-mock are intentionally absent from Pod A's egress.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: blocked-mock
+      ports:
+        - port: {{ .Values.mocks.blocked.httpPort }}
+          protocol: TCP
+
     # ── Envoy admin (localhost only — no egress needed, just self) ────────────
     # No entry needed: loopback traffic is always allowed and not covered by
     # NetworkPolicy (it never leaves the pod's network namespace).
