@@ -52,14 +52,19 @@ jobs:
           done
 
   # ───────────────────────────────────────────────────────────────────────────
-  # Job 2 — full integration test
-  # Spins up a real Kind cluster, deploys the stack in dev mode, waits for
-  # every pod to become Ready, then runs the smoke tests.
+  # Job 2 — full integration test, once per mode
+  # Spins up a real Kind cluster, deploys the stack, waits for every pod to
+  # become Ready, then runs the mode's smoke test. Each mode runs in its own
+  # isolated cluster in parallel.
   # ───────────────────────────────────────────────────────────────────────────
   integration:
-    name: Integration test (dev mode)
+    name: Integration test (${{ matrix.mode }})
     runs-on: ubuntu-latest
     needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [dev, qa, prod]
 
     steps:
       - uses: actions/checkout@v4
@@ -106,13 +111,13 @@ jobs:
             -n kube-system --timeout=120s
 
       # ── deploy ────────────────────────────────────────────────────────────
-      # make dev: build → kind load → generate certs + k8s secrets → helmfile apply
-      - name: Deploy dev stack
-        run: make dev
+      # make <mode>: build → kind load → generate certs + secrets → helmfile apply
+      - name: Deploy ${{ matrix.mode }} stack
+        run: make ${{ matrix.mode }}
 
       # ── smoke test ────────────────────────────────────────────────────────
       - name: Smoke test
-        run: make test-dev
+        run: make test-${{ matrix.mode }}
 
       # ── diagnostics (always runs so failures are readable) ────────────────
       - name: Pod status

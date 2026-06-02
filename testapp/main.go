@@ -205,7 +205,11 @@ func jwtMiddleware(pub *rsa.PublicKey, headerName string, next http.Handler) htt
 // Outbound helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-func callHTTP(label, url string, tlsCfg *tls.Config) string {
+// callHTTP returns a human-readable result line and an error.
+// The error is non-nil only on a transport failure (connection refused/reset,
+// timeout, TLS handshake failure) — i.e. the egress never completed. An HTTP
+// response of any status counts as "the call got through" and returns nil.
+func callHTTP(label, url string, tlsCfg *tls.Config) (string, error) {
 	transport := &http.Transport{}
 	if tlsCfg != nil {
 		transport.TLSClientConfig = tlsCfg
@@ -213,14 +217,16 @@ func callHTTP(label, url string, tlsCfg *tls.Config) string {
 	client := &http.Client{Timeout: 5 * time.Second, Transport: transport}
 	resp, err := client.Get(url)
 	if err != nil {
-		return fmt.Sprintf("%-22s → ERROR: %v", label, err)
+		return fmt.Sprintf("%-22s → ERROR: %v", label, err), err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	return fmt.Sprintf("%-22s → HTTP %d: %s", label, resp.StatusCode, strings.TrimSpace(string(body)))
+	return fmt.Sprintf("%-22s → HTTP %d: %s", label, resp.StatusCode, strings.TrimSpace(string(body))), nil
 }
 
-func callTCP(label, addr string, tlsCfg *tls.Config) string {
+// callTCP returns a result line and an error (non-nil on dial/handshake/read
+// failure — the connection never completed).
+func callTCP(label, addr string, tlsCfg *tls.Config) (string, error) {
 	var conn net.Conn
 	var err error
 	if tlsCfg != nil {
@@ -229,14 +235,28 @@ func callTCP(label, addr string, tlsCfg *tls.Config) string {
 		conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
 	}
 	if err != nil {
-		return fmt.Sprintf("%-22s → ERROR: %v", label, err)
+		return fmt.Sprintf("%-22s → ERROR: %v", label, err), err
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(3 * time.Second))
 	fmt.Fprint(conn, "PING\n")
 	buf := make([]byte, 64)
-	n, _ := conn.Read(buf)
-	return fmt.Sprintf("%-22s → TCP OK, got: %q", label, strings.TrimSpace(string(buf[:n])))
+	n, rerr := conn.Read(buf)
+	if n == 0 && rerr != nil {
+		return fmt.Sprintf("%-22s → ERROR: %v", label, rerr), rerr
+	}
+	return fmt.Sprintf("%-22s → TCP OK, got: %q", label, strings.TrimSpace(string(buf[:n]))), nil
+}
+
+// respond writes a single outbound call's result. On a transport error
+// (egress blocked / connection reset) it sets HTTP 502 so a caller can tell a
+// blocked egress from a permitted one by status code alone.
+func respond(w http.ResponseWriter, result string, err error) {
+	w.Header().Set("Content-Type", "text/plain")
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+	}
+	fmt.Fprintln(w, result)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -276,24 +296,33 @@ func registerPodA(mux *http.ServeMux, clientTLS *tls.Config) {
 	}
 
 	mux.HandleFunc("/call-b", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, callHTTP("pod-a→pod-b", scheme+"://"+podBAddr+"/echo", clientTLS))
+		out, err := callHTTP("pod-a→pod-b", scheme+"://"+podBAddr+"/echo", clientTLS)
+		respond(w, out, err)
 	})
 	mux.HandleFunc("/call-kafka", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, callTCP("pod-a→kafka", kafkaAddr, clientTLS))
+		out, err := callTCP("pod-a→kafka", kafkaAddr, clientTLS)
+		respond(w, out, err)
 	})
 	mux.HandleFunc("/call-llm", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, callHTTP("pod-a→llm-gateway", scheme+"://"+llmAddr+"/echo", clientTLS))
+		out, err := callHTTP("pod-a→llm-gateway", scheme+"://"+llmAddr+"/echo", clientTLS)
+		respond(w, out, err)
 	})
 	mux.HandleFunc("/call-blocked", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, callHTTP("pod-a→BLOCKED", scheme+"://"+blockedAddr+"/echo", clientTLS))
+		out, err := callHTTP("pod-a→BLOCKED", scheme+"://"+blockedAddr+"/echo", clientTLS)
+		respond(w, out, err)
 	})
 	mux.HandleFunc("/call-all", func(w http.ResponseWriter, r *http.Request) {
+		// Summary endpoint: always 200, individual outcomes printed in the body.
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintln(w, "=== pod-a outbound summary ===")
-		fmt.Fprintln(w, callHTTP("pod-a→pod-b", scheme+"://"+podBAddr+"/echo", clientTLS))
-		fmt.Fprintln(w, callTCP("pod-a→kafka", kafkaAddr, clientTLS))
-		fmt.Fprintln(w, callHTTP("pod-a→llm", scheme+"://"+llmAddr+"/echo", clientTLS))
-		fmt.Fprintln(w, callHTTP("pod-a→BLOCKED", scheme+"://"+blockedAddr+"/echo", clientTLS))
+		out, _ := callHTTP("pod-a→pod-b", scheme+"://"+podBAddr+"/echo", clientTLS)
+		fmt.Fprintln(w, out)
+		out, _ = callTCP("pod-a→kafka", kafkaAddr, clientTLS)
+		fmt.Fprintln(w, out)
+		out, _ = callHTTP("pod-a→llm", scheme+"://"+llmAddr+"/echo", clientTLS)
+		fmt.Fprintln(w, out)
+		out, _ = callHTTP("pod-a→BLOCKED", scheme+"://"+blockedAddr+"/echo", clientTLS)
+		fmt.Fprintln(w, out)
 	})
 }
 
@@ -309,24 +338,33 @@ func registerPodB(mux *http.ServeMux, clientTLS *tls.Config) {
 	}
 
 	mux.HandleFunc("/call-kafka", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, callTCP("pod-b→kafka", kafkaAddr, clientTLS))
+		out, err := callTCP("pod-b→kafka", kafkaAddr, clientTLS)
+		respond(w, out, err)
 	})
 	mux.HandleFunc("/call-sts", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, callHTTP("pod-b→sts", scheme+"://"+stsAddr+"/echo", clientTLS))
+		out, err := callHTTP("pod-b→sts", scheme+"://"+stsAddr+"/echo", clientTLS)
+		respond(w, out, err)
 	})
 	mux.HandleFunc("/call-internal", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, callHTTP("pod-b→internal-api", scheme+"://"+internalAPIAddr+"/echo", clientTLS))
+		out, err := callHTTP("pod-b→internal-api", scheme+"://"+internalAPIAddr+"/echo", clientTLS)
+		respond(w, out, err)
 	})
 	mux.HandleFunc("/call-blocked", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, callHTTP("pod-b→BLOCKED", scheme+"://"+blockedAddr+"/echo", clientTLS))
+		out, err := callHTTP("pod-b→BLOCKED", scheme+"://"+blockedAddr+"/echo", clientTLS)
+		respond(w, out, err)
 	})
 	mux.HandleFunc("/call-all", func(w http.ResponseWriter, r *http.Request) {
+		// Summary endpoint: always 200, individual outcomes printed in the body.
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintln(w, "=== pod-b outbound summary ===")
-		fmt.Fprintln(w, callTCP("pod-b→kafka", kafkaAddr, clientTLS))
-		fmt.Fprintln(w, callHTTP("pod-b→sts", scheme+"://"+stsAddr+"/echo", clientTLS))
-		fmt.Fprintln(w, callHTTP("pod-b→internal-api", scheme+"://"+internalAPIAddr+"/echo", clientTLS))
-		fmt.Fprintln(w, callHTTP("pod-b→BLOCKED", scheme+"://"+blockedAddr+"/echo", clientTLS))
+		out, _ := callTCP("pod-b→kafka", kafkaAddr, clientTLS)
+		fmt.Fprintln(w, out)
+		out, _ = callHTTP("pod-b→sts", scheme+"://"+stsAddr+"/echo", clientTLS)
+		fmt.Fprintln(w, out)
+		out, _ = callHTTP("pod-b→internal-api", scheme+"://"+internalAPIAddr+"/echo", clientTLS)
+		fmt.Fprintln(w, out)
+		out, _ = callHTTP("pod-b→BLOCKED", scheme+"://"+blockedAddr+"/echo", clientTLS)
+		fmt.Fprintln(w, out)
 	})
 }
 

@@ -173,10 +173,10 @@ test-qa:
 	@echo "→ all legitimate calls (with mTLS client cert)"
 	$(_curl_mtls) $(F5)/call-all
 	@echo ""
-	@echo "→ /call-blocked (should SUCCEED but log a violation)"
+	@echo "→ /call-blocked (must SUCCEED in QA — logged, not blocked)"
 	$(_curl_mtls) $(F5)/call-blocked && echo " ✅ (passed — expected in QA)"
 	@echo ""
-	@echo "→ Envoy access log — look for shadow_result=DENY on the blocked call:"
+	@echo "→ Envoy access log (look for shadow_result=DENY on the blocked call):"
 	kubectl logs -n $(NS) -l app=pod-a -c envoy --tail=10
 	@echo "\n✅  QA: violations logged, nothing blocked"
 
@@ -187,16 +187,16 @@ test-prod:
 	$(_curl_mtls) $(F5)/call-kafka  && echo " ✅ kafka"
 	$(_curl_mtls) $(F5)/call-llm    && echo " ✅ llm-gateway"
 	@echo ""
-	@echo "→ /call-blocked (must FAIL — connection reset by Envoy)"
-	$(_curl_mtls) $(F5)/call-blocked \
-	  && echo " ❌ UNEXPECTED: request succeeded" \
-	  || echo " ✅ blocked as expected (connection reset)"
+	@echo "→ /call-blocked (must FAIL — Envoy resets egress, app returns 502)"
+	@if $(_curl_mtls) $(F5)/call-blocked >/dev/null 2>&1; then \
+	  echo " ❌ UNEXPECTED: blocked egress succeeded"; exit 1; \
+	else echo " ✅ blocked as expected (non-2xx)"; fi
 	@echo ""
-	@echo "→ Rejection from wrong CN (no client cert — should be 403 or reset)"
-	kubectl exec -n $(NS) client -- \
-	  curl -sf --max-time 5 --cacert /certs/ca.crt $(F5)/health \
-	  && echo " ❌ UNEXPECTED: accepted without client cert" \
-	  || echo " ✅ rejected without client cert (expected)"
+	@echo "→ Rejection without client cert (must fail the mTLS handshake)"
+	@if kubectl exec -n $(NS) client -- \
+	     curl -sf --max-time 5 --cacert /certs/ca.crt $(F5)/health >/dev/null 2>&1; then \
+	  echo " ❌ UNEXPECTED: accepted without client cert"; exit 1; \
+	else echo " ✅ rejected without client cert"; fi
 	@echo "\n✅  PROD: whitelist enforced"
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
