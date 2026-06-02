@@ -326,13 +326,27 @@ SHARED: "blocked" outbound listener — tests whitelist-violation behaviour.
   filter_chains:
     - filters:
 {{- if eq .Values.envoy.mode "prod" }}
+        # DENY-all RBAC rejects the connection before tcp_proxy runs. The
+        # tcp_proxy is still required so the filter chain has a terminal filter
+        # (a chain with only a non-terminal RBAC filter is malformed and lets
+        # traffic through). It is never reached: every connection is denied.
         - name: envoy.filters.network.rbac
           typed_config:
             "@type": type.googleapis.com/envoy.extensions.filters.network.rbac.v3.RBAC
             stat_prefix: "blocked_prod."
             rules:
-              action: ALLOW
-              policies: {}   # empty = nothing matches = deny all → connection reset
+              action: DENY
+              policies:
+                deny-all:
+                  permissions:
+                    - any: true
+                  principals:
+                    - any: true
+        - name: envoy.filters.network.tcp_proxy
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+            stat_prefix: blocked_prod_fwd
+            cluster: blocked_mock
 {{- else if eq .Values.envoy.mode "qa" }}
         - name: envoy.filters.network.rbac
           typed_config:
