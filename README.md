@@ -252,12 +252,41 @@ authorize egress per pod.
 
 ## Testing
 
-Deploy a mode, then run its smoke test:
+Deploy a mode, then run its smoke test, or run the full connectivity probe:
 
 ```bash
-make dev   && make test-dev
+make dev   && make test-dev    # deploy + smoke test
 make qa    && make test-qa
 make prod  && make test-prod
+
+make probe                     # full connectivity matrix (valid + invalid + netpol)
+```
+
+### `make probe` — full connectivity matrix
+
+After any deploy, `make probe` exercises **every** connection — the ones that must work
+and the ones that must be blocked — and prints a pass/fail table. A correctly-blocked
+connection counts as ✅ (the observed behaviour matched the expectation). It returns
+non-zero if any cell disagrees, so it doubles as a post-deploy gate.
+
+```
+════ INBOUND — sidecar mTLS + CN whitelist (Pod A) ═══════════════════
+  ✅ client WITH valid cert → pod-a /health             (ALLOW)
+  ✅ client WITHOUT cert    → pod-a /health             (DENY)
+════ POD A EGRESS — via gateway, authorized by CN=pod-a ══════════════
+  ✅ pod-a → pod-b        (direct east-west)            (ALLOW)
+  ✅ pod-a → kafka        (gateway)                     (ALLOW)
+  ✅ pod-a → llm-gateway  (gateway)                     (ALLOW)
+  ✅ pod-a → internal-api (CN not authorized)           (DENY)
+  ✅ pod-a → blocked      (no route)                    (DENY)
+════ POD B EGRESS — via gateway, authorized by CN=pod-b ══════════════
+  ✅ pod-b → kafka        (gateway)                     (ALLOW)
+  ✅ pod-b → internal-api (gateway)                     (ALLOW)
+  ✅ pod-b → llm-gateway  (CN not authorized)           (DENY)
+  ✅ pod-b → blocked      (no route)                    (DENY)
+════ NETWORKPOLICY — pods cannot reach upstreams directly ════════════
+  ✅ pod-a → kafka-mock        DIRECT (kernel drop)     (DROPPED)
+  ✅ pod-a → internal-api-mock DIRECT (kernel drop)     (DROPPED)
 ```
 
 ### What each mode changes

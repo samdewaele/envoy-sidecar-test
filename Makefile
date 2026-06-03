@@ -34,7 +34,7 @@ CALICO_URL     := https://raw.githubusercontent.com/projectcalico/calico/$(CALIC
 
 .PHONY: help cluster calico registry build push certs plugins \
         dev qa prod \
-        egress-matrix test-dev test-qa test-prod \
+        egress-matrix test-dev test-qa test-prod probe \
         logs-f5 logs-haproxy logs-a logs-b logs-gw \
         status down clean
 
@@ -61,9 +61,10 @@ help:
 	@echo "    make prod         deploy in PROD mode"
 	@echo ""
 	@echo "  Test"
-	@echo "    make test-dev     smoke test DEV  (all paths should pass)"
-	@echo "    make test-qa      smoke test QA   (violations logged, not blocked)"
-	@echo "    make test-prod    smoke test PROD (blocked path must fail)"
+	@echo "    make test-dev     smoke test DEV  (egress matrix + inbound)"
+	@echo "    make test-qa      smoke test QA   (+ inbound shadow log)"
+	@echo "    make test-prod    smoke test PROD (+ no-cert rejection)"
+	@echo "    make probe        full connectivity matrix (valid + invalid + netpol)"
 	@echo ""
 	@echo "  Logs"
 	@echo "    make logs-f5      tail f5-sim (nginx) logs"
@@ -125,21 +126,20 @@ certs:
 dev: push certs plugins
 	helmfile -e dev apply
 	@echo ""
-	@echo "✅  DEV stack deployed"
-	@echo "    Traffic: test-client → f5-sim (no TLS) → haproxy → pod-a envoy (no TLS) → app"
+	@echo "✅  DEV stack deployed (inbound RBAC not loaded; mTLS + gateway egress authz always on)"
+	@echo "    ▶  run 'make probe' to test every connection (valid + invalid)"
 
 qa: push certs plugins
 	helmfile -e qa apply
 	@echo ""
-	@echo "✅  QA stack deployed"
-	@echo "    Traffic: test-client ──mTLS──▶ f5-sim ──HTTP+CN──▶ haproxy ──TLS──▶ pod-a envoy ──▶ app"
-	@echo "    Violations: logged with shadow_result=DENY — run 'make logs-a' to watch"
+	@echo "✅  QA stack deployed (inbound CN whitelist evaluated but only logged)"
+	@echo "    ▶  run 'make probe' to test every connection (valid + invalid)"
 
 prod: push certs plugins
 	helmfile -e prod apply
 	@echo ""
-	@echo "✅  PROD stack deployed"
-	@echo "    Violations: BLOCKED — /call-blocked will return connection reset"
+	@echo "✅  PROD stack deployed (inbound CN whitelist enforced)"
+	@echo "    ▶  run 'make probe' to test every connection (valid + invalid)"
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 # Pod A is exercised through the real ingress chain (client → f5 → haproxy →
@@ -205,6 +205,12 @@ test-prod: egress-matrix
 	  echo "  ❌ UNEXPECTED: accepted without client cert"; exit 1; \
 	else echo "  ✅ rejected without client cert"; fi
 	@echo "\n✅  PROD passed"
+
+# Full connectivity matrix — valid + invalid + NetworkPolicy. Runs every check
+# (does not abort on first failure) and prints a pass/fail table.
+probe:
+	@chmod +x scripts/probe.sh
+	@./scripts/probe.sh
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
 

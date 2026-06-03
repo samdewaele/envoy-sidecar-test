@@ -119,6 +119,10 @@ jobs:
       - name: Smoke test
         run: make test-${{ matrix.mode }}
 
+      # ── full connectivity matrix (valid + invalid + NetworkPolicy) ─────────
+      - name: Connectivity probe
+        run: make probe
+
       # ── diagnostics (always runs so failures are readable) ────────────────
       - name: Pod status
         if: always()
