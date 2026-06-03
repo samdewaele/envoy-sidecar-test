@@ -486,13 +486,79 @@ to the shared egress gateway over mTLS, setting the **SNI to the target name**. 
 reads the SNI to route, terminates the pod's mTLS, authorizes the pod's **client-cert CN**
 for that target, then re-encrypts (fresh mTLS) to the real upstream.
 
-```
-  pod-a/pod-b app ──plain──▶ sidecar egress listener ──mTLS, SNI=<target>──▶ gateway
-                                                                               │
-                              terminate mTLS · check CN · re-encrypt mTLS ◀────┘
-                                                                               │
-                                                                               ▼
-                                                            kafka / llm-gateway / internal-api
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client<br/>client ns
+    participant F as f5-sim<br/>f5 ns :443
+    participant H as HAProxy<br/>haproxy ns :8443
+    participant EA as Pod A Envoy<br/>apps ns :8443
+    participant AA as Pod A app<br/>127.0.0.1:9090
+    participant EB as Pod B Envoy<br/>apps ns :8443
+    participant AB as Pod B app<br/>127.0.0.1:9090
+    participant GW as Egress GW<br/>gateway ns :8443
+    participant K as kafka-mock<br/>kafka ns :9092
+    participant I as internal-api<br/>internal-api ns :8080
+    participant BL as blocked-mock<br/>blocked ns :8080
+
+    rect rgb(235,245,255)
+    Note over C,EA: INBOUND — mTLS terminated + CN whitelisted by the sidecar
+    C->>F: TLS to f5-sim.f5.svc:443 (GET /call-kafka)
+    Note over C,F: HOP1 mTLS · f5 server cert CN=f5-sim ·<br/>client cert CN=test-client · f5 verifies vs CA
+    Note over F: extract CN → header X-SSL-Client-CN: test-client
+    F->>H: HTTP/1.1 to haproxy.haproxy.svc:8443
+    Note over F,H: HOP2 mTLS (re-encrypt) · f5 client cert CN=f5-sim ·<br/>haproxy server cert CN=haproxy
+    H->>EA: to pod-a-service.apps.svc:8443
+    Note over H,EA: HOP3 mTLS (re-encrypt) · haproxy client cert CN=haproxy ·<br/>Pod A server cert CN=pod-a · require_client_certificate
+    Note over EA: HTTP RBAC: X-SSL-Client-CN==test-client OR src∈10.0.0.0/8 → ALLOW<br/>Lua injects X-Envoy-Internal-JWT (RS256, signed by jwt.key)
+    EA->>AA: HTTP 127.0.0.1:9090 (local_app)
+    Note over AA: validate JWT with jwt.pub → handle /call-kafka
+    end
+
+    rect rgb(235,255,235)
+    Note over AA,K: EGRESS (allowed) — pod-a → kafka via gateway
+    AA->>EA: plain TCP 127.0.0.1:19092
+    EA->>GW: mTLS to gateway.gateway.svc:8443, SNI=kafka
+    Note over EA,GW: cluster gw_kafka · Pod A client cert CN=pod-a · GW server cert CN=gateway
+    Note over GW: SNI=kafka → filter chain [kafka] · terminate mTLS ·<br/>network RBAC CN∈{pod-a,pod-b} → ALLOW
+    GW->>K: mTLS (re-encrypt) to kafka-mock.kafka.svc:9092 (GW cert CN=gateway)
+    K-->>AA: PONG ↩ back through GW → EA → app → HTTP 200 to client
+    end
+
+    rect rgb(255,240,235)
+    Note over AA,I: EGRESS (denied by CN) — pod-a → internal-api
+    AA->>EA: plain TCP 127.0.0.1:19094
+    EA->>GW: mTLS to gateway:8443, SNI=internal-api (CN=pod-a)
+    Note over GW: chain [internal-api] · RBAC allowed CN={pod-b} · pod-a ∉ → DENY
+    GW--xEA: reset
+    Note over AA: app → HTTP 502 to client
+    end
+
+    rect rgb(255,235,235)
+    Note over AA,BL: EGRESS (denied, no route) — → blocked
+    AA->>EA: plain TCP 127.0.0.1:19999
+    EA->>GW: mTLS to gateway:8443, SNI=blocked
+    Note over GW: no filter chain for [blocked] → connection closed
+    GW--xEA: reset
+    Note over AA: app → HTTP 502 (blocked-mock never contacted)
+    end
+
+    rect rgb(245,235,255)
+    Note over AA,AB: POD A → POD B (direct east-west, NOT via gateway)
+    AA->>EA: plain HTTP 127.0.0.1:19080
+    EA->>EB: mTLS to pod-b-service.apps.svc:8443 (Pod A cert CN=pod-a, Pod B cert CN=pod-b)
+    Note over EB: RBAC matches via src∈10.0.0.0/8 · Lua injects JWT
+    EB->>AB: HTTP 127.0.0.1:9090 → validate JWT → /echo → HTTP 200
+    end
+
+    rect rgb(235,255,235)
+    Note over EB,I: POD B EGRESS — internal-api allowed; llm-gateway denied by CN
+    AB->>EB: plain TCP 127.0.0.1:19094
+    EB->>GW: mTLS SNI=internal-api (CN=pod-b)
+    Note over GW: RBAC allowed CN={pod-b} → ALLOW
+    GW->>I: mTLS (re-encrypt) to internal-api-mock.internal-api.svc:8080
+    Note over AB,GW: (pod-b → SNI=llm-gateway would be DENIED: allowed CN={pod-a})
+    end
 ```
 
 The gateway blocks two ways:
@@ -511,12 +577,40 @@ can tell them apart. Egress is no longer authorized in the sidecar — the gatew
 single egress policy point. NetworkPolicy backs this at the kernel: pods may only egress to
 the gateway namespace; the gateway may only egress to the allowed target namespaces.
 
-### Full traffic chain
+### Topology & allowed connections
 
-> **Note:** the diagram below illustrates the **inbound** chain (client → F5 → HAProxy →
-> Pod A → Pod B) and predates the namespace split. Outbound now flows through the egress
-> gateway as described in [Egress gateway](#egress-gateway) above, and each component lives
-> in its own namespace. The inbound mTLS + CN-whitelisting path is unchanged.
+Each component lives in its own namespace. NetworkPolicy permits only the edges
+below; everything else is dropped at the kernel by Calico.
+
+```mermaid
+flowchart LR
+    C[client ns<br/>test-client]
+    F[f5 ns<br/>f5-sim :443]
+    H[haproxy ns<br/>haproxy :8443]
+    subgraph apps ns
+      PA[pod-a Envoy :8443<br/>+ app :9090]
+      PB[pod-b Envoy :8443<br/>+ app :9090]
+    end
+    GW[gateway ns<br/>egress GW :8443]
+    KF[kafka ns<br/>:9092]
+    LLM[llm-gateway ns<br/>:8080]
+    INT[internal-api ns<br/>:8080]
+    BLK[blocked ns<br/>:8080]
+
+    C -->|mTLS| F
+    F -->|mTLS| H
+    H -->|mTLS| PA
+    PA -->|mTLS direct| PB
+    PA -->|mTLS SNI| GW
+    PB -->|mTLS SNI| GW
+    GW -->|re-encrypt| KF
+    GW -->|re-encrypt| LLM
+    GW -->|re-encrypt| INT
+    GW -. no route / no policy .-x BLK
+```
+
+<details>
+<summary>Legacy ASCII diagram (single-namespace, pre-gateway — kept for reference)</summary>
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -585,6 +679,8 @@ the gateway namespace; the gateway may only egress to the allowed target namespa
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+</details>
+
 ### mTLS on every hop — no exceptions
 
 | Hop | Who presents cert | Who verifies |
@@ -593,7 +689,8 @@ the gateway namespace; the gateway may only egress to the allowed target namespa
 | f5-sim → haproxy | f5-sim (CN=`f5-sim`) | haproxy (checks CA) |
 | haproxy → Pod A Envoy | haproxy (CN=`haproxy`) | Pod A Envoy (checks CA) |
 | Pod A Envoy → Pod B Envoy | Pod A (CN=`pod-a`) | Pod B Envoy (checks CA) |
-| Envoy → mock targets | Pod A/B (CN=`pod-a`/`pod-b`) | mock (checks CA) |
+| Pod Envoy → egress gateway | Pod A/B (CN=`pod-a`/`pod-b`) | gateway (checks CA + authorizes CN) |
+| gateway → mock targets (re-encrypt) | gateway (CN=`gateway`) | mock (checks CA) |
 
 All certificates are signed by a single self-signed CA (`certs/ca.crt`).  
 In production, replace `scripts/generate-certs.sh` with your Vault PKI engine calls.
