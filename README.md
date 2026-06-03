@@ -476,6 +476,9 @@ helmfile -e prod diff
 
 ## Architecture
 
+> 📋 For a full end-to-end **sequence diagram** with every component, port,
+> certificate, and the NetworkPolicy backstop, see [docs/SEQUENCE.md](docs/SEQUENCE.md).
+
 ### Egress gateway
 
 Pods do not reach external systems directly. Each sidecar tunnels every external target
