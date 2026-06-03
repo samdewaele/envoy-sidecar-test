@@ -162,6 +162,13 @@ _execb = kubectl exec -n $(NS_APPS) -c app \
 
 # Shared egress authorization matrix — identical in dev/qa/prod.
 egress-matrix:
+	@echo "── warming up ingress chain + gateway (cold-start guard) ───────"
+	@ok=0; for i in $$(seq 1 15); do \
+	  if $(_curl_mtls) $(F5)/call-kafka >/dev/null 2>&1; then ok=1; break; fi; \
+	  echo "  waiting for chain... ($$i)"; sleep 2; \
+	done; \
+	if [ $$ok -ne 1 ]; then echo "  ❌ chain never became ready"; exit 1; fi; \
+	echo "  ✅ chain ready"
 	@echo "── Pod A egress (client → f5 → pod-a) ──────────────────────────"
 	$(_curl_mtls) $(F5)/call-b     && echo "  ✅ pod-a → pod-b (direct)"
 	$(_curl_mtls) $(F5)/call-kafka && echo "  ✅ pod-a → kafka (gateway)"
