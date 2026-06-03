@@ -44,7 +44,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: kafka-mock
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.kafka }}
   labels:
     app: kafka-mock
 spec:
@@ -96,7 +96,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: llm-gateway-mock
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.llmGateway }}
   labels:
     app: llm-gateway-mock
 spec:
@@ -135,58 +135,13 @@ spec:
 ---
 {{- end }}
 
-# ── STS mock ──────────────────────────────────────────────────────────────────
-{{- if .Values.mocks.sts.enabled }}
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: sts-mock
-  namespace: {{ .Values.global.namespace }}
-  labels:
-    app: sts-mock
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: sts-mock
-  template:
-    metadata:
-      labels:
-        app: sts-mock
-    spec:
-      containers:
-        - name: mock
-          image: {{ .Values.global.imageRegistry }}{{ .Values.mocks.image }}
-          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
-          env:
-            - name: APP_ROLE
-              value: "mock"
-            - name: APP_PORT
-              value: {{ .Values.mocks.sts.httpPort | quote }}
-            {{- include "mock.tlsEnv" . | nindent 12 }}
-          ports:
-            - containerPort: {{ .Values.mocks.sts.httpPort }}
-              name: https
-          volumeMounts:
-            {{- include "mock.tlsVolumeMount" . | nindent 12 }}
-          readinessProbe:
-            tcpSocket:
-              port: {{ .Values.mocks.sts.httpPort }}
-            initialDelaySeconds: 3
-            periodSeconds: 5
-          {{ include "mock.securityContext" . | nindent 10 }}
-      volumes:
-        {{- include "mock.tlsVolume" . | nindent 8 }}
----
-{{- end }}
-
 # ── Internal API mock ─────────────────────────────────────────────────────────
 {{- if .Values.mocks.internalAPI.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: internal-api-mock
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.internalApi }}
   labels:
     app: internal-api-mock
 spec:
@@ -231,7 +186,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: blocked-mock
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.blocked }}
   labels:
     app: blocked-mock
 spec:

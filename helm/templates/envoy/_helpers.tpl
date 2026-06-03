@@ -1,26 +1,20 @@
 {{/*
 =============================================================================
-envoy/_helpers.tpl
-Composes the Envoy static config for each pod role.
+envoy/_helpers.tpl — Envoy sidecar config for each pod role.
 
-Transport rule (non-negotiable, all modes):
-  EVERY listener uses mTLS (require_client_certificate: true).
-  EVERY upstream cluster that talks to another Envoy sidecar uses mTLS.
-  Mock targets (kafka, llm, sts, internal-api) use plain TCP/HTTP because
-  they are toy test responders — in production replace with real TLS clusters.
+Transport (all modes): EVERY listener and inter-pod cluster uses mTLS.
+Inbound RBAC (mode-driven):
+  dev  — no RBAC filter (all authenticated callers allowed)
+  qa   — shadow_rules: evaluated, violations LOGGED, traffic passes
+  prod — enforced: non-matching requests get 403 / reset
 
-Mode only controls RBAC enforcement (application-layer policy):
-  dev  — no RBAC filter → Envoy passes everything; useful for bring-up
-  qa   — shadow_rules   → RBAC evaluated, violations LOGGED, traffic passes
-  prod — rules          → RBAC enforced, violations BLOCKED (connection reset)
+Egress: the sidecar no longer authorizes egress. Every external target is a
+tcp_proxy to the shared egress GATEWAY over mTLS with a per-target SNI; the
+gateway enforces per-CN authorization and routing. Pod B is the only direct
+(east-west) hop and stays sidecar-to-sidecar.
 =============================================================================
 */}}
 
-{{/*
-─────────────────────────────────────────────────────────────────────────────
-SHARED: admin block
-─────────────────────────────────────────────────────────────────────────────
-*/}}
 {{- define "envoy.admin" -}}
 admin:
   address:
@@ -29,12 +23,7 @@ admin:
       port_value: {{ .Values.envoy.ports.admin }}
 {{- end }}
 
-{{/*
-─────────────────────────────────────────────────────────────────────────────
-SHARED: downstream mTLS context — applied to EVERY inbound listener.
-Requires the connecting party to present a CA-signed certificate.
-─────────────────────────────────────────────────────────────────────────────
-*/}}
+{{/* downstream mTLS — applied to every inbound listener */}}
 {{- define "envoy.downstreamTLS" -}}
 transport_socket:
   name: envoy.transport_sockets.tls
@@ -52,11 +41,7 @@ transport_socket:
           filename: {{ .Values.envoy.tls.mountPath }}/ca.crt
 {{- end }}
 
-{{/*
-─────────────────────────────────────────────────────────────────────────────
-SHARED: upstream mTLS context — applied to clusters that talk to another Envoy.
-─────────────────────────────────────────────────────────────────────────────
-*/}}
+{{/* upstream mTLS — for the direct Pod B cluster (no SNI override needed) */}}
 {{- define "envoy.upstreamTLS" -}}
 transport_socket:
   name: envoy.transport_sockets.tls
@@ -73,11 +58,6 @@ transport_socket:
           filename: {{ .Values.envoy.tls.mountPath }}/ca.crt
 {{- end }}
 
-{{/*
-─────────────────────────────────────────────────────────────────────────────
-SHARED: access log (stdout, structured)
-─────────────────────────────────────────────────────────────────────────────
-*/}}
 {{- define "envoy.accessLog" -}}
 access_log:
   - name: envoy.access_loggers.stdout
@@ -88,15 +68,7 @@ access_log:
           inline_string: "[%START_TIME%] \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" %RESPONSE_CODE% %RESPONSE_FLAGS% bytes=%BYTES_SENT% cn=\"%REQ(X-SSL-CLIENT-CN)%\" shadow=%DYNAMIC_METADATA(envoy.filters.http.rbac:shadow_engine_result)%\n"
 {{- end }}
 
-{{/*
-─────────────────────────────────────────────────────────────────────────────
-SHARED: HTTP RBAC filter — mode-driven, never removes mTLS.
-
-  dev  → not emitted (no RBAC filter; Envoy passes everything)
-  qa   → shadow_rules only; violations appear in access log as shadow_result=DENY
-  prod → enforced; non-matching requests receive 403 / connection reset
-─────────────────────────────────────────────────────────────────────────────
-*/}}
+{{/* Inbound HTTP RBAC — mode-driven (dev: omitted, qa: shadow, prod: enforced) */}}
 {{- define "envoy.rbacFilter" -}}
 {{- $mode := .Values.envoy.mode -}}
 {{- $cns  := .allowedCNs -}}
@@ -107,13 +79,9 @@ SHARED: HTTP RBAC filter — mode-driven, never removes mTLS.
   typed_config:
     "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC
 {{- if eq $mode "qa" }}
-    # QA: shadow_rules only — policy is evaluated and logged but never enforced.
-    # rules: is intentionally absent; an empty rules: {} would deny all traffic.
-    # Look for shadow_result=DENY in the access log to spot violations.
     shadow_rules_stat_prefix: "whitelist_shadow."
     shadow_rules:
 {{- else }}
-    # PROD: enforced — requests not matching any policy are denied.
     rules:
 {{- end }}
       action: ALLOW
@@ -144,19 +112,7 @@ SHARED: HTTP RBAC filter — mode-driven, never removes mTLS.
 {{- end }}
 {{- end }}
 
-{{/*
-─────────────────────────────────────────────────────────────────────────────
-SHARED: JWT injector Lua filter — inserted into every INBOUND HCM filter chain.
-
-Reads a pre-signed RS256 JWT from the file mounted from envoy-jwt-token secret
-and injects it as a request header (default: X-Envoy-Internal-JWT).
-The app container validates the JWT with the public key from app-jwt-pubkey
-secret.  The private key is NEVER mounted into the app container.
-
-When jwt.enabled is false the template emits nothing and the app skips
-validation (JWT_PUBKEY_FILE env var will not be set).
-─────────────────────────────────────────────────────────────────────────────
-*/}}
+{{/* JWT injector Lua filter — inserted into every inbound HCM chain */}}
 {{- define "envoy.jwtInjectorFilter" -}}
 {{- if .Values.envoy.jwt.enabled -}}
 - name: envoy.filters.http.lua
@@ -164,7 +120,6 @@ validation (JWT_PUBKEY_FILE env var will not be set).
     "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
     default_source_code:
       inline_string: |
-        -- Token is loaded lazily once per worker thread and then cached.
         local _jwt_token = nil
         function envoy_on_request(request_handle)
           if _jwt_token == nil then
@@ -183,17 +138,7 @@ validation (JWT_PUBKEY_FILE env var will not be set).
 {{- end -}}
 {{- end }}
 
-{{/*
-─────────────────────────────────────────────────────────────────────────────
-SHARED: health listener — plain HTTP on 0.0.0.0 for kubelet liveness/readiness.
-
-The admin interface stays bound to 127.0.0.1 (it exposes /config_dump,
-/quitquitquit and other sensitive endpoints — never expose it on the pod IP).
-This listener returns a static 200 via direct_response so kubelet, which
-probes from outside the pod's network namespace, has something reachable.
-It carries no application traffic and needs no mTLS.
-─────────────────────────────────────────────────────────────────────────────
-*/}}
+{{/* Health listener — plain HTTP 200 on 0.0.0.0 for kubelet probes */}}
 {{- define "envoy.healthListener" -}}
 - name: health
   address:
@@ -224,11 +169,7 @@ It carries no application traffic and needs no mTLS.
                   "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 {{- end }}
 
-{{/*
-─────────────────────────────────────────────────────────────────────────────
-SHARED: outbound TCP-proxy listener (plain TCP, e.g. Kafka mock)
-─────────────────────────────────────────────────────────────────────────────
-*/}}
+{{/* Local outbound tcp-proxy listener (app plaintext → cluster) */}}
 {{- define "envoy.outboundTCPListener" -}}
 - name: {{ .name }}
   address:
@@ -244,43 +185,7 @@ SHARED: outbound TCP-proxy listener (plain TCP, e.g. Kafka mock)
             cluster: {{ .cluster }}
 {{- end }}
 
-{{/*
-─────────────────────────────────────────────────────────────────────────────
-SHARED: outbound HTTP listener (plain HTTP toward mock targets)
-─────────────────────────────────────────────────────────────────────────────
-*/}}
-{{- define "envoy.outboundHTTPListener" -}}
-- name: {{ .name }}
-  address:
-    socket_address:
-      address: 127.0.0.1
-      port_value: {{ .localPort }}
-  filter_chains:
-    - filters:
-        - name: envoy.filters.network.http_connection_manager
-          typed_config:
-            "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-            stat_prefix: {{ .name }}
-            codec_type: AUTO
-            route_config:
-              name: {{ .name }}_route
-              virtual_hosts:
-                - name: {{ .name }}
-                  domains: ["*"]
-                  routes:
-                    - match: { prefix: "/" }
-                      route: { cluster: {{ .cluster }} }
-            http_filters:
-              - name: envoy.filters.http.router
-                typed_config:
-                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
-{{- end }}
-
-{{/*
-─────────────────────────────────────────────────────────────────────────────
-SHARED: outbound mTLS HTTP listener (toward another Envoy sidecar)
-─────────────────────────────────────────────────────────────────────────────
-*/}}
+{{/* Local outbound mTLS HTTP listener (toward another Envoy sidecar — Pod B) */}}
 {{- define "envoy.outboundMTLSHTTPListener" -}}
 - name: {{ .name }}
   address:
@@ -308,64 +213,7 @@ SHARED: outbound mTLS HTTP listener (toward another Envoy sidecar)
                   "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 {{- end }}
 
-{{/*
-─────────────────────────────────────────────────────────────────────────────
-SHARED: "blocked" outbound listener — tests whitelist-violation behaviour.
-
-  dev  → TCP proxy to blocked-mock; app gets a response (no enforcement)
-  qa   → network RBAC LOG action + forward to blocked-mock; violation logged
-  prod → listener is NOT created — the forbidden egress has no proxy at all,
-         so the app's connection to the local port is refused (fail closed).
-         This is the most reliable enforcement: the sidecar only opens
-         outbound listeners for whitelisted destinations.
-─────────────────────────────────────────────────────────────────────────────
-*/}}
-{{- define "envoy.blockedListener" -}}
-{{- if eq .Values.envoy.mode "prod" -}}
-# prod: no blocked listener — forbidden egress is not proxied (connection refused)
-{{- else }}
-- name: outbound_blocked
-  address:
-    socket_address:
-      address: 127.0.0.1
-      port_value: {{ .Values.envoy.ports.outboundBlocked }}
-  filter_chains:
-    - filters:
-{{- if eq .Values.envoy.mode "qa" }}
-        - name: envoy.filters.network.rbac
-          typed_config:
-            "@type": type.googleapis.com/envoy.extensions.filters.network.rbac.v3.RBAC
-            stat_prefix: "blocked_qa."
-            rules:
-              action: LOG
-              policies:
-                log-violation:
-                  permissions:
-                    - any: true
-                  principals:
-                    - any: true
-        - name: envoy.filters.network.tcp_proxy
-          typed_config:
-            "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
-            stat_prefix: blocked_qa_fwd
-            cluster: blocked_mock
-{{- else }}
-        - name: envoy.filters.network.tcp_proxy
-          typed_config:
-            "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
-            stat_prefix: blocked_dev
-            cluster: blocked_mock
-{{- end }}
-{{- end }}
-{{- end }}
-
-{{/*
-─────────────────────────────────────────────────────────────────────────────
-SHARED: static cluster
-  tls=true  → mTLS (all inter-pod and Envoy→mock traffic)
-  tls=false → plain (loopback to local app only; never used for network traffic)
-─────────────────────────────────────────────────────────────────────────────
-*/}}
+{{/* Direct cluster (local_app loopback, or Pod B over mTLS when tls=true) */}}
 {{- define "envoy.cluster" -}}
 - name: {{ .name }}
   type: STRICT_DNS
@@ -380,13 +228,118 @@ SHARED: static cluster
                   address: {{ .address }}
                   port_value: {{ .port }}
 {{- if .tls }}
-{{- include "envoy.upstreamTLS" (dict "Values" .Values) | nindent 2 }}
+  {{- include "envoy.upstreamTLS" (dict "Values" .Values) | nindent 2 }}
 {{- end }}
 {{- end }}
 
 {{/*
+Gateway egress cluster — points at the shared egress gateway, with a
+per-target SNI so the gateway can route. mTLS presents the pod's own cert
+(CN=pod-a / pod-b), which the gateway uses for authorization.
+*/}}
+{{- define "envoy.gatewayCluster" -}}
+- name: {{ .name }}
+  type: STRICT_DNS
+  connect_timeout: 5s
+  load_assignment:
+    cluster_name: {{ .name }}
+    endpoints:
+      - lb_endpoints:
+          - endpoint:
+              address:
+                socket_address:
+                  address: {{ .gatewayAddr }}
+                  port_value: {{ .gatewayPort }}
+  transport_socket:
+    name: envoy.transport_sockets.tls
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+      sni: {{ .sni | quote }}
+      common_tls_context:
+        tls_certificates:
+          - certificate_chain:
+              filename: {{ .mountPath }}/tls.crt
+            private_key:
+              filename: {{ .mountPath }}/tls.key
+        validation_context:
+          trusted_ca:
+            filename: {{ .mountPath }}/ca.crt
+{{- end }}
+
+{{/*
+Shared egress listeners + clusters toward the gateway (identical for both
+pods — the gateway, not the sidecar, decides which CN may use which SNI).
+Renders the four gateway-bound listeners and their clusters.
+*/}}
+{{- define "envoy.gatewayEgressListeners" -}}
+{{- include "envoy.outboundTCPListener" (dict "name" "outbound_kafka"    "localPort" .Values.envoy.ports.outboundKafka    "cluster" "gw_kafka") }}
+{{ include "envoy.outboundTCPListener" (dict "name" "outbound_llm"      "localPort" .Values.envoy.ports.outboundLLM      "cluster" "gw_llm_gateway") }}
+{{ include "envoy.outboundTCPListener" (dict "name" "outbound_internal" "localPort" .Values.envoy.ports.outboundInternal "cluster" "gw_internal_api") }}
+{{ include "envoy.outboundTCPListener" (dict "name" "outbound_blocked"  "localPort" .Values.envoy.ports.outboundBlocked  "cluster" "gw_blocked") }}
+{{- end }}
+
+{{- define "envoy.gatewayEgressClusters" -}}
+{{- $addr := include "gateway.fqdn" . -}}
+{{- $port := .Values.gateway.service.port -}}
+{{- $mp := .Values.envoy.tls.mountPath -}}
+{{- include "envoy.gatewayCluster" (dict "name" "gw_kafka"        "sni" "kafka"        "gatewayAddr" $addr "gatewayPort" $port "mountPath" $mp) }}
+{{ include "envoy.gatewayCluster" (dict "name" "gw_llm_gateway"   "sni" "llm-gateway"  "gatewayAddr" $addr "gatewayPort" $port "mountPath" $mp) }}
+{{ include "envoy.gatewayCluster" (dict "name" "gw_internal_api"  "sni" "internal-api" "gatewayAddr" $addr "gatewayPort" $port "mountPath" $mp) }}
+{{ include "envoy.gatewayCluster" (dict "name" "gw_blocked"       "sni" "blocked"      "gatewayAddr" $addr "gatewayPort" $port "mountPath" $mp) }}
+{{- end }}
+
+{{/* local_app cluster (loopback to the app container) */}}
+{{- define "envoy.localAppCluster" -}}
+- name: local_app
+  type: STATIC
+  connect_timeout: 5s
+  load_assignment:
+    cluster_name: local_app
+    endpoints:
+      - lb_endpoints:
+          - endpoint:
+              address:
+                socket_address:
+                  address: 127.0.0.1
+                  port_value: {{ .Values.envoy.ports.appPort }}
+{{- end }}
+
+{{/* Inbound listener (shared shape; caller passes stat prefix + RBAC params) */}}
+{{- define "envoy.inboundListener" -}}
+- name: inbound
+  address:
+    socket_address:
+      address: 0.0.0.0
+      port_value: {{ .root.Values.envoy.ports.inbound }}
+  filter_chains:
+    - {{- include "envoy.downstreamTLS" .root | nindent 6 }}
+      filters:
+        - name: envoy.filters.network.http_connection_manager
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+            stat_prefix: {{ .statPrefix }}
+            codec_type: AUTO
+            use_remote_address: true
+            {{- include "envoy.accessLog" .root | nindent 12 }}
+            route_config:
+              name: inbound_route
+              virtual_hosts:
+                - name: local
+                  domains: ["*"]
+                  routes:
+                    - match: { prefix: "/" }
+                      route: { cluster: local_app }
+            http_filters:
+              {{- include "envoy.rbacFilter" (dict "Values" .root.Values "allowedCNs" .allowedCNs "allowedCIDRs" .allowedCIDRs "cnHeader" .cnHeader) | nindent 14 }}
+              {{- include "envoy.jwtInjectorFilter" .root | nindent 14 }}
+              - name: envoy.filters.http.router
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+{{- end }}
+
+{{/*
 =============================================================================
-POD A — full Envoy config
+POD A — inbound + direct Pod B + gateway egress
 =============================================================================
 */}}
 {{- define "envoy.config.podA" -}}
@@ -394,118 +347,27 @@ POD A — full Envoy config
 
 static_resources:
   listeners:
-    # ── Inbound ──────────────────────────────────────────────────────────────
-    # HAProxy connects here after its mTLS re-encrypt.
-    # mTLS is ALWAYS required — mode only controls RBAC enforcement.
-    - name: inbound
-      address:
-        socket_address:
-          address: 0.0.0.0
-          port_value: {{ .Values.envoy.ports.inbound }}
-      filter_chains:
-        - {{ include "envoy.downstreamTLS" . | nindent 10 }}
-          filters:
-            - name: envoy.filters.network.http_connection_manager
-              typed_config:
-                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-                stat_prefix: inbound_pod_a
-                codec_type: AUTO
-                use_remote_address: true
-                {{- include "envoy.accessLog" . | nindent 16 }}
-                route_config:
-                  name: inbound_route
-                  virtual_hosts:
-                    - name: local
-                      domains: ["*"]
-                      routes:
-                        - match: { prefix: "/" }
-                          route: { cluster: local_app }
-                http_filters:
-                  {{- include "envoy.rbacFilter" (dict
-                        "Values"       .Values
-                        "allowedCNs"   .Values.podA.inbound.allowedClientCNs
-                        "allowedCIDRs" .Values.podA.inbound.allowedSourceCIDRs
-                        "cnHeader"     .Values.podA.inbound.cnHeader) | nindent 18 }}
-                  {{- include "envoy.jwtInjectorFilter" . | nindent 18 }}
-                  - name: envoy.filters.http.router
-                    typed_config:
-                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+    {{- include "envoy.inboundListener" (dict "root" . "statPrefix" "inbound_pod_a" "allowedCNs" .Values.podA.inbound.allowedClientCNs "allowedCIDRs" .Values.podA.inbound.allowedSourceCIDRs "cnHeader" .Values.podA.inbound.cnHeader) | nindent 4 }}
 
-    # ── Health (plain HTTP on 0.0.0.0 for kubelet probes) ─────────────────────
     {{- include "envoy.healthListener" . | nindent 4 }}
 
-    # ── Outbound: Pod B (mTLS — Pod B has an Envoy sidecar) ──────────────────
-    {{- include "envoy.outboundMTLSHTTPListener" (dict
-          "name"      "outbound_pod_b"
-          "localPort" .Values.envoy.ports.outboundPodB
-          "cluster"   "pod_b") | nindent 4 }}
+    # Direct east-west to Pod B (not via gateway)
+    {{- include "envoy.outboundMTLSHTTPListener" (dict "name" "outbound_pod_b" "localPort" .Values.envoy.ports.outboundPodB "cluster" "pod_b") | nindent 4 }}
 
-    # ── Outbound: Kafka mock (plain TCP — toy mock, no TLS) ───────────────────
-    {{- include "envoy.outboundTCPListener" (dict
-          "name"      "outbound_kafka"
-          "localPort" .Values.envoy.ports.outboundKafka
-          "cluster"   "kafka") | nindent 4 }}
-
-    # ── Outbound: LLM Gateway mock (plain HTTP — toy mock) ───────────────────
-    {{- include "envoy.outboundHTTPListener" (dict
-          "name"      "outbound_llm"
-          "localPort" .Values.envoy.ports.outboundLLM
-          "cluster"   "llm_gateway") | nindent 4 }}
-
-    # ── Outbound: Blocked (whitelist-violation test) ──────────────────────────
-    {{- include "envoy.blockedListener" . | nindent 4 }}
+    # Egress via gateway (SNI-routed; gateway enforces per-CN authz)
+    {{- include "envoy.gatewayEgressListeners" . | nindent 4 }}
 
   clusters:
-    - name: local_app
-      type: STATIC
-      connect_timeout: 5s
-      load_assignment:
-        cluster_name: local_app
-        endpoints:
-          - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address:
-                      address: 127.0.0.1
-                      port_value: {{ .Values.envoy.ports.appPort }}
+    {{- include "envoy.localAppCluster" . | nindent 4 }}
 
-    # Pod B — mTLS: ALWAYS on (Pod B's Envoy requires client cert)
-    {{- include "envoy.cluster" (dict
-          "name"    "pod_b"
-          "address" .Values.podA.outbound.podB.address
-          "port"    .Values.podA.outbound.podB.port
-          "tls"     true
-          "Values"  .Values) | nindent 4 }}
+    {{- include "envoy.cluster" (dict "name" "pod_b" "address" (printf "%s.%s.svc.%s" .Values.podA.outbound.podB.address .Values.namespaces.apps .Values.global.clusterDomain) "port" .Values.podA.outbound.podB.port "tls" true "Values" .Values) | nindent 4 }}
 
-    # Kafka mock — mTLS TCP
-    {{- include "envoy.cluster" (dict
-          "name"    "kafka"
-          "address" .Values.podA.outbound.kafka.address
-          "port"    .Values.podA.outbound.kafka.port
-          "tls"     true
-          "Values"  .Values) | nindent 4 }}
-
-    # LLM Gateway mock — mTLS
-    {{- include "envoy.cluster" (dict
-          "name"    "llm_gateway"
-          "address" .Values.podA.outbound.llmGateway.address
-          "port"    .Values.podA.outbound.llmGateway.port
-          "tls"     true
-          "Values"  .Values) | nindent 4 }}
-
-    # Blocked mock — mTLS (DEV/QA only; PROD never reaches this cluster)
-    {{- include "envoy.cluster" (dict
-          "name"    "blocked_mock"
-          "address" "blocked-mock"
-          "port"    .Values.mocks.blocked.httpPort
-          "tls"     true
-          "Values"  .Values) | nindent 4 }}
+    {{- include "envoy.gatewayEgressClusters" . | nindent 4 }}
 {{- end }}
-
 
 {{/*
 =============================================================================
-POD B — full Envoy config
+POD B — inbound + gateway egress (no direct Pod B; only Pod A reaches Pod B)
 =============================================================================
 */}}
 {{- define "envoy.config.podB" -}}
@@ -513,107 +375,15 @@ POD B — full Envoy config
 
 static_resources:
   listeners:
-    # ── Inbound ──────────────────────────────────────────────────────────────
-    # Only Pod A's Envoy sidecar should reach this.
-    # mTLS is ALWAYS required.
-    - name: inbound
-      address:
-        socket_address:
-          address: 0.0.0.0
-          port_value: {{ .Values.envoy.ports.inbound }}
-      filter_chains:
-        - {{ include "envoy.downstreamTLS" . | nindent 10 }}
-          filters:
-            - name: envoy.filters.network.http_connection_manager
-              typed_config:
-                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-                stat_prefix: inbound_pod_b
-                codec_type: AUTO
-                use_remote_address: true
-                {{- include "envoy.accessLog" . | nindent 16 }}
-                route_config:
-                  name: inbound_route
-                  virtual_hosts:
-                    - name: local
-                      domains: ["*"]
-                      routes:
-                        - match: { prefix: "/" }
-                          route: { cluster: local_app }
-                http_filters:
-                  {{- include "envoy.rbacFilter" (dict
-                        "Values"       .Values
-                        "allowedCNs"   .Values.podB.inbound.allowedClientCNs
-                        "allowedCIDRs" .Values.podB.inbound.allowedSourceCIDRs
-                        "cnHeader"     .Values.podB.inbound.cnHeader) | nindent 18 }}
-                  {{- include "envoy.jwtInjectorFilter" . | nindent 18 }}
-                  - name: envoy.filters.http.router
-                    typed_config:
-                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+    {{- include "envoy.inboundListener" (dict "root" . "statPrefix" "inbound_pod_b" "allowedCNs" .Values.podB.inbound.allowedClientCNs "allowedCIDRs" .Values.podB.inbound.allowedSourceCIDRs "cnHeader" .Values.podB.inbound.cnHeader) | nindent 4 }}
 
-    # ── Health (plain HTTP on 0.0.0.0 for kubelet probes) ─────────────────────
     {{- include "envoy.healthListener" . | nindent 4 }}
 
-    # ── Outbound: Kafka mock (plain TCP — toy mock) ───────────────────────────
-    {{- include "envoy.outboundTCPListener" (dict
-          "name"      "outbound_kafka"
-          "localPort" .Values.envoy.ports.outboundKafka
-          "cluster"   "kafka") | nindent 4 }}
-
-    # ── Outbound: STS mock (plain HTTP — toy mock) ────────────────────────────
-    {{- include "envoy.outboundHTTPListener" (dict
-          "name"      "outbound_sts"
-          "localPort" .Values.envoy.ports.outboundSTS
-          "cluster"   "sts") | nindent 4 }}
-
-    # ── Outbound: Internal API mock (plain HTTP — toy mock) ───────────────────
-    {{- include "envoy.outboundHTTPListener" (dict
-          "name"      "outbound_internal"
-          "localPort" .Values.envoy.ports.outboundInternal
-          "cluster"   "internal_api") | nindent 4 }}
-
-    # ── Outbound: Blocked ────────────────────────────────────────────────────
-    {{- include "envoy.blockedListener" . | nindent 4 }}
+    # Egress via gateway (SNI-routed; gateway enforces per-CN authz)
+    {{- include "envoy.gatewayEgressListeners" . | nindent 4 }}
 
   clusters:
-    - name: local_app
-      type: STATIC
-      connect_timeout: 5s
-      load_assignment:
-        cluster_name: local_app
-        endpoints:
-          - lb_endpoints:
-              - endpoint:
-                  address:
-                    socket_address:
-                      address: 127.0.0.1
-                      port_value: {{ .Values.envoy.ports.appPort }}
+    {{- include "envoy.localAppCluster" . | nindent 4 }}
 
-    {{- include "envoy.cluster" (dict
-          "name"    "kafka"
-          "address" .Values.podB.outbound.kafka.address
-          "port"    .Values.podB.outbound.kafka.port
-          "tls"     true
-          "Values"  .Values) | nindent 4 }}
-
-    {{- include "envoy.cluster" (dict
-          "name"    "sts"
-          "address" .Values.podB.outbound.sts.address
-          "port"    .Values.podB.outbound.sts.port
-          "tls"     true
-          "Values"  .Values) | nindent 4 }}
-
-    {{- include "envoy.cluster" (dict
-          "name"    "internal_api"
-          "address" .Values.podB.outbound.internalAPI.address
-          "port"    .Values.podB.outbound.internalAPI.port
-          "tls"     true
-          "Values"  .Values) | nindent 4 }}
-
-    # Blocked mock — mTLS (DEV/QA only; PROD never reaches this cluster)
-    {{- include "envoy.cluster" (dict
-          "name"    "blocked_mock"
-          "address" "blocked-mock"
-          "port"    .Values.mocks.blocked.httpPort
-          "tls"     true
-          "Values"  .Values) | nindent 4 }}
+    {{- include "envoy.gatewayEgressClusters" . | nindent 4 }}
 {{- end }}

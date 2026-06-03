@@ -61,8 +61,8 @@ environments:
 ---
 releases:
   - name: envoy-sidecar
-    namespace: envoy-test
-    createNamespace: false   # namespace is created by make certs (kubectl) before helmfile runs
+    namespace: apps          # where Helm stores release metadata; resources set their own namespaces
+    createNamespace: false   # all namespaces are created by make certs (kubectl) before helmfile runs
     chart: ./helm
 
     # Pass the merged environment values (assembled from the files listed in

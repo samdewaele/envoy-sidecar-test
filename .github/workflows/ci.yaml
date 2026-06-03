@@ -119,35 +119,41 @@ jobs:
       - name: Smoke test
         run: make test-${{ matrix.mode }}
 
+      # ── full connectivity matrix (valid + invalid + NetworkPolicy) ─────────
+      - name: Connectivity probe
+        run: make probe
+
       # ── diagnostics (always runs so failures are readable) ────────────────
       - name: Pod status
         if: always()
         run: |
-          echo "════ pods ════════════════════════════════════════════"
-          kubectl get pods -n envoy-test -o wide
-
+          echo "════ pods (all namespaces) ════════════════════════════"
+          kubectl get pods -A -o wide
           echo ""
-          echo "════ events (last 30) ════════════════════════════════"
-          kubectl get events -n envoy-test \
-            --sort-by='.lastTimestamp' | tail -30
+          echo "════ events (apps + gateway) ══════════════════════════"
+          kubectl get events -n apps --sort-by='.lastTimestamp' | tail -20 || true
+          kubectl get events -n gateway --sort-by='.lastTimestamp' | tail -20 || true
 
-      # On failure, trace each endpoint with timing and dump every pod's logs.
+      # On failure, trace pod-a's endpoints with timing and dump every tier's logs.
       - name: Diagnose smoke failure
         if: failure()
         run: |
-          echo "════ per-endpoint curl with timing ════════════════════"
-          for path in /health /call-b /call-kafka /call-llm /call-blocked; do
-            kubectl exec -n envoy-test client -- sh -c "
+          echo "════ per-endpoint curl from client via f5 (pod-a paths) ════"
+          for path in /health /call-b /call-kafka /call-llm /call-internal /call-blocked; do
+            kubectl exec -n client client -- sh -c "
               curl -sS -o /dev/null -w '$path -> HTTP %{http_code} in %{time_total}s\n' \
                 --max-time 10 \
                 --cert /certs/client.crt --key /certs/client.key --cacert /certs/ca.crt \
-                https://f5-sim.envoy-test.svc.cluster.local$path \
+                https://f5-sim.f5.svc.cluster.local$path \
                 || echo '$path -> curl exit '\$?" || true
           done
 
-          for tier in f5-sim haproxy pod-a pod-b blocked-mock; do
+          echo ""
+          echo "════ logs: gateway ════════════════════════════════════"
+          kubectl logs -n gateway -l app=gateway --tail=60 2>/dev/null || true
+          for entry in "f5:f5-sim" "haproxy:haproxy" "apps:pod-a" "apps:pod-b"; do
+            ns="${entry%%:*}"; app="${entry##*:}"
             echo ""
-            echo "════ logs: $tier ═════════════════════════════════════"
-            kubectl logs -n envoy-test -l "app=$tier" \
-              --all-containers --prefix --tail=50 2>/dev/null || true
+            echo "════ logs: $app (ns=$ns) ═══════════════════════════════"
+            kubectl logs -n "$ns" -l "app=$app" --all-containers --prefix --tail=50 2>/dev/null || true
           done

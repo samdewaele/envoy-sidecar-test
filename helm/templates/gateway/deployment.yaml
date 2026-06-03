@@ -1,0 +1,75 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.gateway.name }}
+  namespace: {{ .Values.namespaces.gateway }}
+  labels:
+    app: {{ .Values.gateway.name }}
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.gateway.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.gateway.name }}
+      annotations:
+        checksum/config: {{ .Files.Get "templates/gateway/configmap.yaml" | sha256sum }}
+    spec:
+      containers:
+        - name: envoy
+          image: {{ .Values.global.imageRegistry }}{{ .Values.gateway.image }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args:
+            - -c
+            - /etc/envoy/envoy.yaml
+            - --log-level
+            - info
+          ports:
+            - name: egress
+              containerPort: {{ .Values.gateway.ports.listen }}
+              protocol: TCP
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /etc/envoy
+            - name: gateway-certs
+              mountPath: {{ .Values.gateway.tls.mountPath }}
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.gateway.ports.health }}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.gateway.ports.health }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 192Mi
+          securityContext:
+            runAsNonRoot: true
+            {{- if .Values.global.envoyUID }}
+            runAsUser: {{ .Values.global.envoyUID }}
+            {{- end }}
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: gateway-config
+          configMap:
+            name: gateway-config
+        - name: gateway-certs
+          secret:
+            secretName: {{ .Values.gateway.tls.secretName }}
+{{- end }}

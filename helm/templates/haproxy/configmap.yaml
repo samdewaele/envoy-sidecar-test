@@ -11,7 +11,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: haproxy-config
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.haproxy }}
 data:
   haproxy.cfg: |
     global
@@ -42,4 +42,4 @@ data:
     backend bk_pod_a
       mode http
       balance roundrobin
-      server pod-a pod-a-service.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.podA.service.port }} ssl verify required ca-file /certs/ca.crt crt /certs/haproxy.pem
+      server pod-a pod-a-service.{{ .Values.namespaces.apps }}.svc.{{ .Values.global.clusterDomain }}:{{ .Values.podA.service.port }} ssl verify required ca-file /certs/ca.crt crt /certs/haproxy.pem

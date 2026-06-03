@@ -1,8 +1,25 @@
 # envoy-sidecar-test
 
-Toy test stack for an Envoy-based mTLS sidecar pattern.  
-Validates the full traffic chain — external client through F5/HAProxy simulation into two
-Kubernetes pods — before the sidecar is integrated into the production application chart.
+Toy test stack for an Envoy **mTLS sidecar + egress gateway** pattern.  
+It validates the full traffic chain — external client through an F5/HAProxy simulation,
+into two application pods, and back out through a shared egress gateway — before the
+pattern is integrated into a production application chart.
+
+**Topology:** every component runs in its own namespace (`f5`, `haproxy`, `apps`,
+`gateway`, `client`, `kafka`, `internal-api`, `llm-gateway`, `blocked`) to mirror a real
+multi-tenant cluster.
+
+**Two enforcement planes:**
+
+- **Sidecars** handle **inbound** — terminate client mTLS and enforce the CN whitelist
+  (dev: off, qa: shadow/logged, prod: enforced) plus JWT injection. **The client CN is
+  only used to authorize requests into Pod A.**
+- **Egress gateway** (a standalone Envoy) handles **outbound** — pods open mTLS to it with
+  a per-target SNI; it terminates, authorizes by the pod's **client-cert CN**, and
+  re-encrypts to the upstream. Pod-to-pod (pod-a→pod-b) stays direct sidecar-to-sidecar.
+
+> 📋 Full end-to-end **sequence diagram** with every component, port, certificate, and the
+> NetworkPolicy backstop: **[docs/SEQUENCE.md](docs/SEQUENCE.md)**.
 
 ---
 
@@ -10,7 +27,7 @@ Kubernetes pods — before the sidecar is integrated into the production applica
 
 **Everything runs on your local machine — no cloud account, no VM, no remote cluster.**  
 `make cluster` creates a Kubernetes cluster inside Docker using [Kind](https://kind.sigs.k8s.io/).  
-The registry, cluster, and all pods are Docker containers on your machine. `make down` cleans everything up.
+The cluster and all pods are Docker containers on your machine. `make down` cleans everything up.
 
 Pick your OS below and follow the steps in order.
 
@@ -128,10 +145,6 @@ helm plugin install https://github.com/databus23/helm-diff
 ```bash
 git clone https://github.com/samdewaele/envoy-sidecar-test.git
 cd envoy-sidecar-test
-
-# helm-diff plugin — required by helmfile, not bundled with helm
-helm plugin install https://github.com/databus23/helm-diff
-
 docker ps && kind version && kubectl version --client --short && helm version --short && helmfile --version
 ```
 
@@ -182,24 +195,22 @@ cd envoy-sidecar-test
 
 ## Quick start
 
+```bash
+make cluster   # 1. Kind cluster + Calico CNI
+make push      # 2. build the testapp image + load it into the Kind nodes
+make certs     # 3. CA, leaf certs, JWT keypair → create namespaces + secrets
+make dev       # 4. deploy (push + certs + plugins run automatically)
+make test-dev  # 5. smoke test
+```
+
 ### 1. Create the cluster
 
 ```bash
 make cluster
 ```
 
-This creates a Kind cluster with:
-- Default CNI disabled
-- Calico installed and waited on
-- NodePort 30443 mapped to `localhost:30443` (f5-sim entry point from host)
-
-Expected output:
-```
-▶  Creating kind cluster...
-▶  Installing Calico CNI (required for NetworkPolicy)...
-▶  Waiting for Calico to be ready...
-✅  Cluster ready
-```
+Creates a Kind cluster with the default CNI disabled, **Calico** installed (required for
+NetworkPolicy), and NodePort `30443` mapped to `localhost:30443`.
 
 ### 2. Build and load the testapp image
 
@@ -207,331 +218,369 @@ Expected output:
 make push
 ```
 
-Builds `testapp/main.go` into a minimal Go binary and loads it directly into the Kind
-cluster nodes using `kind load docker-image` — no registry required.
-The same image is used for Pod A, Pod B, and all mock targets — role is set by the
-`APP_ROLE` env var.
+Builds `testapp/main.go` into a minimal Go binary and loads it into the Kind nodes with
+`kind load docker-image` — no registry required. One image serves Pod A, Pod B, and every
+mock; the role is selected by the `APP_ROLE` env var (`pod-a` | `pod-b` | `mock`).
 
-### 3. Generate certificates
+### 3. Generate certificates and namespaces
 
 ```bash
 make certs
 ```
 
-Runs `scripts/generate-certs.sh`, which:
+`scripts/generate-certs.sh` creates a self-signed CA, the leaf certs and JWT keypair,
+**all nine namespaces**, and distributes the secrets:
 
-1. Generates a self-signed CA (`certs/ca.crt`)
-2. Issues leaf certs for: `test-client`, `f5-sim`, `haproxy`, `pod-a`, `pod-b`, mock targets
-3. Generates an RSA-2048 keypair and mints a pre-signed RS256 JWT for Envoy's Lua injector
-4. Creates Kubernetes Secrets in the `envoy-test` namespace:
+| Secret | Namespace(s) | Contains | Used by |
+|---|---|---|---|
+| `f5-sim-certs` | `f5` | `tls.{crt,key}`, `ca.crt` (CN=`f5-sim`) | f5-sim |
+| `haproxy-certs` | `haproxy` | `haproxy.pem`, `ca.crt` (CN=`haproxy`) | HAProxy |
+| `envoy-certs-pod-a` | `apps` | `tls.{crt,key}`, `ca.crt` (CN=`pod-a`) | Pod A Envoy |
+| `envoy-certs-pod-b` | `apps` | `tls.{crt,key}`, `ca.crt` (CN=`pod-b`) | Pod B Envoy |
+| `gateway-certs` | `gateway` | `tls.{crt,key}`, `ca.crt` (CN=`gateway`) | egress gateway |
+| `mock-certs` | `kafka`, `llm-gateway`, `internal-api`, `blocked` | `tls.{crt,key}`, `ca.crt` (CN=`mock-target`) | mock targets |
+| `client-certs` | `client` | `client.{crt,key}`, `ca.crt` (CN=`test-client`) | test client |
+| `envoy-jwt-token` | `apps` | `jwt.token` (pre-signed RS256 JWT) | Pod A/B Envoy only |
+| `app-jwt-pubkey` | `apps` | `jwt.pub` (RSA public key) | Pod A/B app only |
 
-| Secret | Used by | Contains |
-|---|---|---|
-| `f5-sim-certs` | f5-sim nginx | `tls.crt`, `tls.key`, `ca.crt` |
-| `haproxy-certs` | HAProxy | `haproxy.pem` (cert+key), `ca.crt` |
-| `envoy-certs` | Pod A + Pod B Envoy sidecars | `tls.crt`, `tls.key`, `ca.crt` |
-| `client-certs` | test-client pod | `client.crt`, `client.key`, `ca.crt` |
-| `mock-certs` | all mock target pods | `tls.crt`, `tls.key`, `ca.crt` |
-| `envoy-jwt-token` | Envoy sidecar (Lua filter) | `jwt.token` — pre-signed RS256 JWT |
-| `app-jwt-pubkey` | app container | `jwt.pub` — RSA public key for verification |
+Pod A and Pod B get **distinct identity certs** (`CN=pod-a` / `CN=pod-b`) so the gateway can
+authorize egress per pod.
 
-> **Note**: `certs/` is in `.gitignore`.  Never commit private keys.
+> **Note**: `certs/` is in `.gitignore`. Never commit private keys.
 
 ---
 
 ## Testing
 
-### Deploy DEV mode
+Deploy a mode, then run its smoke test, or run the full connectivity probe:
 
 ```bash
-make dev
+make dev   && make test-dev    # deploy + smoke test
+make qa    && make test-qa
+make prod  && make test-prod
+
+make probe                     # full connectivity matrix (valid + invalid + netpol)
 ```
 
-Deploys the full stack with `envoy.mode: dev`.  
-mTLS is active on every hop.  Envoy's RBAC filter is not loaded — all traffic that
-presents a valid CA-signed cert is accepted and forwarded.
+### `make probe` — full connectivity matrix
 
-Run the smoke test:
+After any deploy, `make probe` exercises **every** connection — the ones that must work
+and the ones that must be blocked — and prints a pass/fail table. A correctly-blocked
+connection counts as ✅ (the observed behaviour matched the expectation). It returns
+non-zero if any cell disagrees, so it doubles as a post-deploy gate.
 
-```bash
-make test-dev
-```
-
-Expected output — every path succeeds, including `/call-blocked`:
-
-```
-════ DEV smoke test ════
-→ health check via f5-sim           ✅
-→ pod-a calls pod-b                 ✅
-→ pod-a calls kafka                 ✅
-→ pod-a calls llm-gateway           ✅
-→ /call-blocked (no enforcement)    ✅ (expected: passed through)
-```
-
-What this confirms:
-- mTLS handshake works end-to-end through f5-sim → haproxy → Pod A Envoy
-- Pod A can reach Pod B over mTLS
-- Pod A can reach Kafka and LLM gateway mocks
-- The sidecar does not break anything before RBAC is enabled
-
-### Deploy QA mode
-
-```bash
-make qa
-```
-
-Deploys with `envoy.mode: qa`.  
-mTLS is active.  RBAC rules are evaluated using `shadow_rules` — violations are **logged**
-but traffic is **not blocked**.
-
-Run the smoke test:
-
-```bash
-make test-qa
-```
-
-Expected output — everything still passes, but the log reveals the violation:
+For a **live** view, `make probe-watch` re-runs the request matrix every 5 seconds as a
+refreshing dashboard (`make probe-watch INTERVAL=10` to change the cadence; Ctrl-C to stop).
+It's handy for watching behaviour while you tail logs or change config. The watch loop runs
+the inbound + egress requests only; the slower kernel-level NetworkPolicy timeout checks run
+in the one-shot `make probe`.
 
 ```
-════ QA smoke test ════
-→ all legitimate calls (with mTLS client cert)
-  pod-a→pod-b          → HTTP 200 ...
-  pod-a→kafka          → TCP OK ...
-  pod-a→llm            → HTTP 200 ...
-→ /call-blocked — should succeed but log a violation
-  pod-a→BLOCKED        → HTTP 200 ...  ✅ (passed — expected in QA)
-
-→ Envoy access log — look for shadow_result=DENY on the blocked call:
-[2024-...] "GET /call-blocked ..." 200 - bytes=... cn="test-client" shadow_result=DENY
-                                                                     ^^^^^^^^^^^^^^^^^^
+════ INBOUND — sidecar mTLS + CN whitelist (Pod A) ═══════════════════
+  ✅ client WITH valid cert → pod-a /health             (ALLOW)
+  ✅ client WITHOUT cert    → pod-a /health             (DENY)
+════ POD A EGRESS — via gateway, authorized by CN=pod-a ══════════════
+  ✅ pod-a → pod-b        (direct east-west)            (ALLOW)
+  ✅ pod-a → kafka        (gateway)                     (ALLOW)
+  ✅ pod-a → llm-gateway  (gateway)                     (ALLOW)
+  ✅ pod-a → internal-api (CN not authorized)           (DENY)
+  ✅ pod-a → blocked      (no route)                    (DENY)
+════ POD B EGRESS — via gateway, authorized by CN=pod-b ══════════════
+  ✅ pod-b → kafka        (gateway, PONG round-trip)    (ALLOW)
+  ✅ pod-b → internal-api (gateway)                     (ALLOW)
+  ✅ pod-b → llm-gateway  (CN not authorized)           (DENY)
+  ✅ pod-b → blocked      (no route)                    (DENY)
+════ NETWORKPOLICY — pods cannot reach upstreams directly ════════════
+  ✅ pod-a → kafka-mock        DIRECT (kernel drop)     (DROPPED)
+  ✅ pod-a → internal-api-mock DIRECT (kernel drop)     (DROPPED)
 ```
 
-The `shadow_result=DENY` in the access log is the QA violation alert.  
-Watch it live:
+### What each mode changes
 
-```bash
-make logs-a
-```
+Mode controls **only the sidecar's inbound RBAC** on Pod A. mTLS, JWT injection, and the
+**egress gateway authorization are always on** in every mode.
 
-You can also hit each pod's outbound test endpoints individually:
+| | DEV | QA | PROD |
+|---|---|---|---|
+| mTLS on every hop | ✅ | ✅ | ✅ |
+| JWT injection + validation | ✅ | ✅ | ✅ |
+| Gateway egress authz (CN + route) | ✅ | ✅ | ✅ |
+| Inbound CN/CIDR whitelist on Pod A | not loaded | shadow — **logged** | enforced — **blocked** |
 
-```bash
-# From inside the client pod:
-kubectl exec -n envoy-test client -- curl -sf \
-  --cert /certs/client.crt --key /certs/client.key --cacert /certs/ca.crt \
-  https://f5-sim.envoy-test.svc.cluster.local/call-all
-```
+### The egress authorization matrix (identical in every mode)
 
-### Deploy PROD mode
+`make test-*` runs a shared matrix. Pod A is driven through the real ingress chain
+(client → f5 → haproxy → pod-a); Pod B's egress is driven by exec'ing into its app
+container and hitting the sidecar's local egress ports (the client cannot reach Pod B).
 
-```bash
-make prod
-```
+| From | pod-b (direct) | kafka | llm-gateway | internal-api | blocked |
+|---|---|---|---|---|---|
+| **pod-a** | ✅ direct | ✅ via gw | ✅ via gw | ❌ CN denied | ❌ no route |
+| **pod-b** | — | ✅ via gw | ❌ CN denied | ✅ via gw | ❌ no route |
 
-Deploys with `envoy.mode: prod`.  
-mTLS is active.  RBAC rules are enforced — violations result in a **connection reset**.
-
-Run the smoke test:
-
-```bash
-make test-prod
-```
-
-Expected output:
+Expected `make test-prod` output:
 
 ```
+── warming up ingress chain + gateway (cold-start guard) ───────
+  ✅ chain ready
+── Pod A egress (client → f5 → pod-a) ──────────────────────────
+  ✅ pod-a → pod-b (direct)
+  ✅ pod-a → kafka (gateway)
+  ✅ pod-a → llm-gateway (gateway)
+→ pod-a → internal-api must be DENIED (gateway: CN not authorized)
+  ✅ denied by CN
+→ pod-a → blocked must be DENIED (gateway: no route)
+  ✅ denied (no route)
+── Pod B egress (exec → sidecar local egress ports) ────────────
+  ✅ pod-b → internal-api (gateway)
+→ pod-b → llm-gateway must be DENIED (gateway: CN not authorized)
+  ✅ denied by CN
+→ pod-b → blocked must be DENIED (gateway: no route)
+  ✅ denied (no route)
+
 ════ PROD smoke test ════
-→ allowed paths (must succeed)
-  ✅ pod-b
-  ✅ kafka
-  ✅ llm-gateway
-
-→ /call-blocked (must FAIL — connection reset by Envoy)
-  ✅ blocked as expected (connection reset)
-
-→ Rejection without client cert (should fail mTLS handshake)
-  ✅ rejected without client cert (expected)
+  ✅ health via f5 (inbound RBAC enforced, CN=test-client)
+→ Rejection without client cert (must fail the mTLS handshake)
+  ✅ rejected without client cert
+✅  PROD passed
 ```
 
-### Verifying the JWT injection
+- **dev/qa** run the same egress matrix; `test-qa` additionally tails Pod A's Envoy log so
+  you can see the inbound `shadow_result` (qa evaluates the CN whitelist but never blocks).
+- **prod** additionally proves a request **without** a client cert is rejected at the
+  mTLS handshake.
 
-The Envoy Lua filter pre-injects a signed RS256 JWT on every inbound request.  
-The app validates it — any request that bypassed Envoy will get a `401`.
-
-To see the injected JWT header in action, hit the `/echo` endpoint and inspect the output:
+### Inspecting individual calls
 
 ```bash
-kubectl exec -n envoy-test client -- curl -sf \
+# Full outbound summary from Pod A, through the real ingress chain:
+kubectl exec -n client client -- curl -sf \
   --cert /certs/client.crt --key /certs/client.key --cacert /certs/ca.crt \
-  https://f5-sim.envoy-test.svc.cluster.local/echo
+  https://f5-sim.f5.svc.cluster.local/call-all
 ```
 
-You should see `X-Envoy-Internal-Jwt:` in the headers list — that is the JWT Envoy injected.
+### Verifying JWT injection
 
-To test rejection, make a direct request to the app (bypassing Envoy):
+The sidecar's Lua filter injects a signed RS256 JWT on every inbound request; the app
+validates it and rejects anything that bypassed Envoy.
 
 ```bash
-# Exec into the Pod A app container
-kubectl exec -n envoy-test \
-  $(kubectl get pod -n envoy-test -l app=pod-a -o jsonpath='{.items[0].metadata.name}') \
-  -c app -- curl -sf http://127.0.0.1:9090/echo
-# → 401 missing internal auth header
+# See the injected header echoed back:
+kubectl exec -n client client -- curl -sf \
+  --cert /certs/client.crt --key /certs/client.key --cacert /certs/ca.crt \
+  https://f5-sim.f5.svc.cluster.local/echo
+# → headers include  X-Envoy-Internal-Jwt: Bearer eyJ...
+
+# Bypass Envoy by hitting the app directly inside the pod:
+kubectl exec -n apps deploy/pod-a -c app -- \
+  curl -sf http://127.0.0.1:9090/echo
+# → 401  (missing internal auth header — /echo requires the JWT; /health is exempt)
 ```
 
-### Verifying the NetworkPolicy
+### Verifying NetworkPolicy
 
-NetworkPolicy enforcement is separate from Envoy.  To verify it is actually blocking
-traffic at the network level (not just Envoy):
+NetworkPolicy enforcement is independent of Envoy and the gateway. From Pod A's app
+container, a destination outside the egress allow-list is dropped at the kernel:
 
 ```bash
-# Exec into the Pod A app container (not the Envoy sidecar)
-kubectl exec -n envoy-test -it \
-  $(kubectl get pod -n envoy-test -l app=pod-a -o jsonpath='{.items[0].metadata.name}') \
-  -c app -- sh
+# direct to a mock — DROPPED (pods may egress only to the gateway):
+kubectl exec -n apps deploy/pod-a -c app -- \
+  curl -m 5 -s -o /dev/null -w 'exit=%{exitcode}\n' \
+  http://kafka-mock.kafka.svc.cluster.local:9092/
+# → times out (exit 28) — the packet never leaves the pod
+
+# to the gateway — ALLOWED (connection establishes):
+kubectl exec -n apps deploy/pod-a -c app -- \
+  curl -m 5 -s -o /dev/null -w 'connected\n' \
+  https://gateway.gateway.svc.cluster.local:8443/ ; echo "(TLS will fail for a bare curl, but the packet is permitted)"
 ```
 
-From inside the app container, try to reach a destination that is **not** in the
-NetworkPolicy egress whitelist:
+The legitimate path (app → its sidecar's local egress port → gateway) is exactly what the
+egress matrix exercises.
 
-```sh
-# Should hang / time out — NetworkPolicy drops the packet
-wget -T 5 -O- http://sts-mock:8080/health
+### Checking Envoy / gateway admin
 
-# Should also be blocked — not in Pod A's whitelist
-wget -T 5 -O- http://internal-api-mock:8080/health
-```
-
-Both should time out.  If NetworkPolicy is working correctly, the connection never even
-reaches Envoy.
-
-Now try a destination that **is** in the whitelist:
-
-```sh
-# Should succeed — llm-gateway-mock is in Pod A's egress
-wget -T 5 -O- http://llm-gateway-mock:8080/health
-```
-
-### Checking Envoy admin
-
-Each sidecar exposes an admin interface on `localhost:9901` (not exposed outside the pod):
+Admin is bound to `127.0.0.1:9901` (never exposed). Port-forward to inspect:
 
 ```bash
-# Port-forward Pod A's Envoy admin
-kubectl port-forward -n envoy-test \
-  $(kubectl get pod -n envoy-test -l app=pod-a -o jsonpath='{.items[0].metadata.name}') \
-  9901:9901
+# Gateway egress filter chains, clusters, RBAC counters:
+kubectl port-forward -n gateway deploy/gateway 9901:9901
+curl http://localhost:9901/listeners
+curl http://localhost:9901/clusters
+curl 'http://localhost:9901/stats?filter=rbac'
 
-# In another terminal:
-curl http://localhost:9901/clusters           # upstream cluster status
-curl http://localhost:9901/listeners          # listener config
-curl http://localhost:9901/stats?filter=rbac  # RBAC hit/miss counters
+# Pod A sidecar:
+kubectl port-forward -n apps deploy/pod-a 9901:9901
 ```
 
-The `rbac.allowed` and `rbac.denied` counters (or `shadow_engine_result` in QA) are the
-key metrics to watch.
+### Live logs
+
+```bash
+make logs-f5        # f5-sim (nginx)
+make logs-haproxy   # HAProxy
+make logs-a         # Pod A Envoy
+make logs-b         # Pod B Envoy
+make logs-gw        # egress gateway
+```
 
 ### Log reference
 
 | Log line | Meaning |
 |---|---|
-| `shadow_result=DENY` | QA: request matched a deny rule — would be blocked in PROD |
-| `shadow_result=ALLOW` | QA: request passed the whitelist check |
-| `shadow_result=-` | DEV: RBAC filter not loaded |
-| `RESPONSE_FLAGS=DC` | Connection was terminated by Envoy (PROD block) |
-| `RESPONSE_CODE=403` | RBAC denied at HTTP layer |
-| `401 missing internal auth header` | Request reached app without going through Envoy |
+| `shadow_result=DENY` | QA inbound: request would be blocked by the CN whitelist in PROD |
+| `shadow_result=ALLOW` | QA inbound: request passed the whitelist |
+| `shadow_result=-` | DEV inbound: RBAC filter not loaded |
+| `RESPONSE_FLAGS=DC` / connection reset | gateway denied egress (CN) or no SNI route |
+| `401 missing internal auth header` | request reached the app without the injected JWT |
 
 ---
 
 ## Switching environments
 
 ```bash
-make dev    # → helmfile -e dev apply
-make qa     # → helmfile -e qa apply
+make dev    # → helmfile -e dev  apply
+make qa     # → helmfile -e qa   apply
 make prod   # → helmfile -e prod apply
 ```
 
-Helmfile merges `helm/values.yaml` + the environment-specific overlay.  
-The image is injected automatically via `TESTAPP_IMAGE` (set at the top of the Makefile).
-
-To preview what would change before applying:
-
-```bash
-helmfile -e qa diff
-helmfile -e prod diff
-```
+Helmfile merges `helm/values.yaml` + the environment overlay and passes the result to the
+release. The image is injected via `TESTAPP_IMAGE` (set at the top of the Makefile).
+OpenShift overlays also exist: `helmfile -e openshift-{dev,qa,prod} apply` (drops fixed
+UIDs for the restricted SCC, disables the toy f5-sim/haproxy tiers). Preview a change with
+`helmfile -e prod diff`.
 
 ---
 
 ## Architecture
 
-### Full traffic chain
+### Egress gateway
 
+Pods do not reach external systems directly. Each sidecar tunnels every external target to
+the shared egress gateway over mTLS, setting the **SNI to the target name**. The gateway
+reads the SNI to route, terminates the pod's mTLS, authorizes the pod's **client-cert CN**
+for that target, then re-encrypts (fresh mTLS) to the real upstream.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client<br/>client ns
+    participant F as f5-sim<br/>f5 ns :443
+    participant H as HAProxy<br/>haproxy ns :8443
+    participant EA as Pod A Envoy<br/>apps ns :8443
+    participant AA as Pod A app<br/>127.0.0.1:9090
+    participant EB as Pod B Envoy<br/>apps ns :8443
+    participant AB as Pod B app<br/>127.0.0.1:9090
+    participant GW as Egress GW<br/>gateway ns :8443
+    participant K as kafka-mock<br/>kafka ns :9092
+    participant I as internal-api<br/>internal-api ns :8080
+    participant BL as blocked-mock<br/>blocked ns :8080
+
+    rect rgb(235,245,255)
+    Note over C,EA: INBOUND — mTLS terminated + CN whitelisted by the sidecar
+    C->>F: TLS to f5-sim.f5.svc:443 (GET /call-kafka)
+    Note over C,F: HOP1 mTLS · f5 server cert CN=f5-sim ·<br/>client cert CN=test-client · f5 verifies vs CA
+    Note over F: extract CN → header X-SSL-Client-CN: test-client
+    F->>H: HTTP/1.1 to haproxy.haproxy.svc:8443
+    Note over F,H: HOP2 mTLS (re-encrypt) · f5 client cert CN=f5-sim ·<br/>haproxy server cert CN=haproxy
+    H->>EA: to pod-a-service.apps.svc:8443
+    Note over H,EA: HOP3 mTLS (re-encrypt) · haproxy client cert CN=haproxy ·<br/>Pod A server cert CN=pod-a · require_client_certificate
+    Note over EA: HTTP RBAC: X-SSL-Client-CN==test-client OR src∈10.0.0.0/8 → ALLOW<br/>Lua injects X-Envoy-Internal-JWT (RS256, signed by jwt.key)
+    EA->>AA: HTTP 127.0.0.1:9090 (local_app)
+    Note over AA: validate JWT with jwt.pub → handle /call-kafka
+    end
+
+    rect rgb(235,255,235)
+    Note over AA,K: EGRESS (allowed) — pod-a → kafka via gateway
+    AA->>EA: plain TCP 127.0.0.1:19092
+    EA->>GW: mTLS to gateway.gateway.svc:8443, SNI=kafka
+    Note over EA,GW: cluster gw_kafka · Pod A client cert CN=pod-a · GW server cert CN=gateway
+    Note over GW: SNI=kafka → filter chain [kafka] · terminate mTLS ·<br/>network RBAC CN∈{pod-a,pod-b} → ALLOW
+    GW->>K: mTLS (re-encrypt) to kafka-mock.kafka.svc:9092 (GW cert CN=gateway)
+    K-->>AA: PONG ↩ back through GW → EA → app → HTTP 200 to client
+    end
+
+    rect rgb(255,240,235)
+    Note over AA,I: EGRESS (denied by CN) — pod-a → internal-api
+    AA->>EA: plain TCP 127.0.0.1:19094
+    EA->>GW: mTLS to gateway:8443, SNI=internal-api (CN=pod-a)
+    Note over GW: chain [internal-api] · RBAC allowed CN={pod-b} · pod-a ∉ → DENY
+    GW--xEA: reset
+    Note over AA: app → HTTP 502 to client
+    end
+
+    rect rgb(255,235,235)
+    Note over AA,BL: EGRESS (denied, no route) — → blocked
+    AA->>EA: plain TCP 127.0.0.1:19999
+    EA->>GW: mTLS to gateway:8443, SNI=blocked
+    Note over GW: no filter chain for [blocked] → connection closed
+    GW--xEA: reset
+    Note over AA: app → HTTP 502 (blocked-mock never contacted)
+    end
+
+    rect rgb(245,235,255)
+    Note over AA,AB: POD A → POD B (direct east-west, NOT via gateway)
+    AA->>EA: plain HTTP 127.0.0.1:19080
+    EA->>EB: mTLS to pod-b-service.apps.svc:8443 (Pod A cert CN=pod-a, Pod B cert CN=pod-b)
+    Note over EB: RBAC matches via src∈10.0.0.0/8 · Lua injects JWT
+    EB->>AB: HTTP 127.0.0.1:9090 → validate JWT → /echo → HTTP 200
+    end
+
+    rect rgb(235,255,235)
+    Note over EB,I: POD B EGRESS — internal-api allowed; llm-gateway denied by CN
+    AB->>EB: plain TCP 127.0.0.1:19094
+    EB->>GW: mTLS SNI=internal-api (CN=pod-b)
+    Note over GW: RBAC allowed CN={pod-b} → ALLOW
+    GW->>I: mTLS (re-encrypt) to internal-api-mock.internal-api.svc:8080
+    Note over AB,GW: (pod-b → SNI=llm-gateway would be DENIED: allowed CN={pod-a})
+    end
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  Kind cluster  (namespace: envoy-test)                                      │
-│                                                                             │
-│  ┌──────────────┐                                                           │
-│  │ test-client  │  kubectl exec → curl with client cert                    │
-│  └──────┬───────┘                                                           │
-│         │  mTLS  (CN=test-client, verified by CA)                          │
-│         ▼                                                                   │
-│  ┌──────────────┐  nginx                                                   │
-│  │   f5-sim     │  • terminates client TLS                                 │
-│  │              │  • verifies client cert against CA                       │
-│  │              │  • sets X-SSL-Client-CN: <cn> header                     │
-│  └──────┬───────┘                                                           │
-│         │  mTLS  (f5-sim presents its own cert to haproxy)                 │
-│         ▼                                                                   │
-│  ┌──────────────┐  HAProxy                                                 │
-│  │   haproxy    │  • terminates mTLS from f5-sim                           │
-│  │              │  • re-encrypts (new TLS) toward Pod A Envoy              │
-│  │              │  • preserves X-SSL-Client-CN header                      │
-│  └──────┬───────┘                                                           │
-│         │  mTLS  (haproxy presents its cert; Pod A Envoy requires it)      │
-│         ▼                                                                   │
-│  ┌─────────────────────────────────────────────────────┐                   │
-│  │  Pod A                                              │                   │
-│  │  ┌──────────────────┐      ┌────────────────────┐  │                   │
-│  │  │   Envoy sidecar  │─────▶│   testapp          │  │                   │
-│  │  │   port 8443      │ HTTP │   port 9090        │  │                   │
-│  │  │                  │◀─────│   (localhost only) │  │                   │
-│  │  │  • mTLS inbound  │      └────────────────────┘  │                   │
-│  │  │  • RBAC CN check │                               │                   │
-│  │  │  • JWT inject    │                               │                   │
-│  │  │  • outbound      │                               │                   │
-│  │  │    listeners     │                               │                   │
-│  │  └────────┬─────────┘                               │                   │
-│  └───────────┼─────────────────────────────────────────┘                   │
-│              │                                                              │
-│    ┌─────────┼──────────────────────────────────────────┐                  │
-│    │         │  mTLS (Pod A cert → Pod B Envoy)          │                  │
-│    │         ▼                                           │                  │
-│    │  ┌─────────────────────────────────────────────┐   │                  │
-│    │  │  Pod B                                      │   │                  │
-│    │  │  ┌──────────────────┐  ┌─────────────────┐  │   │                  │
-│    │  │  │  Envoy sidecar   │─▶│   testapp       │  │   │                  │
-│    │  │  │  port 8443       │  │   port 9090     │  │   │                  │
-│    │  │  │  • mTLS inbound  │  │ (localhost only)│  │   │                  │
-│    │  │  │  • only Pod A    │  └─────────────────┘  │   │                  │
-│    │  │  │    accepted      │                        │   │                  │
-│    │  │  │  • JWT inject    │                        │   │                  │
-│    │  │  └──────────────────┘                        │   │                  │
-│    │  └─────────────────────────────────────────────┘   │                  │
-│    │                                                     │                  │
-│    │  outbound targets (mTLS — all mocks serve TLS)      │                  │
-│    │  ┌─────────────┐  ┌──────────────┐  ┌──────────┐   │                  │
-│    │  │ kafka-mock  │  │  sts-mock    │  │ internal │   │                  │
-│    │  │  TCP :9092  │  │  HTTP :8080  │  │ api-mock │   │                  │
-│    │  └─────────────┘  └──────────────┘  └──────────┘   │                  │
-│    └────────────────────────────────────────────────────┘                  │
-│                                                                             │
-│  additional outbound targets for Pod A                                     │
-│  ┌──────────────────┐   ┌────────────────┐                                 │
-│  │  llm-gateway-mock│   │  blocked-mock  │  ← only reachable in DEV/QA    │
-│  │  HTTP :8080      │   │  HTTP :8080    │    (PROD: connection reset)     │
-│  └──────────────────┘   └────────────────┘                                 │
-└─────────────────────────────────────────────────────────────────────────────┘
+
+The gateway blocks two ways:
+
+- **CN denied** — the SNI route exists but the calling pod's CN is not authorized for it.
+- **No route** — the SNI has no filter chain (e.g. `blocked`); Envoy rejects the connection.
+
+The routing + authorization table lives in `helm/values.yaml` under `gateway.routes`:
+
+```yaml
+gateway:
+  routes:
+    - { sni: kafka,        upstreamHost: kafka-mock,        upstreamNamespace: kafka,        upstreamPort: 9092, allowedCNs: [pod-a, pod-b] }
+    - { sni: llm-gateway,  upstreamHost: llm-gateway-mock,  upstreamNamespace: llm-gateway,  upstreamPort: 8080, allowedCNs: [pod-a] }
+    - { sni: internal-api, upstreamHost: internal-api-mock, upstreamNamespace: internal-api, upstreamPort: 8080, allowedCNs: [pod-b] }
+    # "blocked" has no entry → no route → rejected
+```
+
+### Topology & allowed connections
+
+Each component lives in its own namespace. NetworkPolicy permits only the edges below;
+everything else is dropped at the kernel by Calico.
+
+```mermaid
+flowchart LR
+    C[client ns<br/>test-client]
+    F[f5 ns<br/>f5-sim :443]
+    H[haproxy ns<br/>haproxy :8443]
+    subgraph apps ns
+      PA[pod-a Envoy :8443<br/>+ app :9090]
+      PB[pod-b Envoy :8443<br/>+ app :9090]
+    end
+    GW[gateway ns<br/>egress GW :8443]
+    KF[kafka ns<br/>:9092]
+    LLM[llm-gateway ns<br/>:8080]
+    INT[internal-api ns<br/>:8080]
+    BLK[blocked ns<br/>:8080]
+
+    C -->|mTLS| F
+    F -->|mTLS| H
+    H -->|mTLS| PA
+    PA -->|mTLS direct| PB
+    PA -->|mTLS SNI| GW
+    PB -->|mTLS SNI| GW
+    GW -->|re-encrypt| KF
+    GW -->|re-encrypt| LLM
+    GW -->|re-encrypt| INT
+    GW -. no route / no policy .-x BLK
 ```
 
 ### mTLS on every hop — no exceptions
@@ -542,164 +591,91 @@ helmfile -e prod diff
 | f5-sim → haproxy | f5-sim (CN=`f5-sim`) | haproxy (checks CA) |
 | haproxy → Pod A Envoy | haproxy (CN=`haproxy`) | Pod A Envoy (checks CA) |
 | Pod A Envoy → Pod B Envoy | Pod A (CN=`pod-a`) | Pod B Envoy (checks CA) |
-| Envoy → mock targets | Pod A/B (CN=`pod-a`/`pod-b`) | mock (checks CA) |
+| Pod Envoy → egress gateway | Pod A/B (CN=`pod-a`/`pod-b`) | gateway (checks CA **+ authorizes CN**) |
+| gateway → mock targets (re-encrypt) | gateway (CN=`gateway`) | mock (checks CA) |
 
 All certificates are signed by a single self-signed CA (`certs/ca.crt`).  
 In production, replace `scripts/generate-certs.sh` with your Vault PKI engine calls.
 
 ### JWT: app-layer protection against Envoy bypass
 
-Even with mTLS and NetworkPolicy in place, the app binds on `127.0.0.1` — which means
-any process inside the pod can reach it directly without going through Envoy.
-
-To close this gap, Envoy's Lua filter injects a pre-signed RS256 JWT on every forwarded
-request.  The app validates the signature on every call (except `/health`):
+The app binds on `127.0.0.1`, so any process inside the pod could in principle reach it
+without going through the sidecar. To close that gap, the sidecar's Lua filter injects a
+pre-signed RS256 JWT on every forwarded inbound request; the app validates it on every call
+(except `/health`):
 
 ```
-Envoy Lua filter                           App container
-────────────────                           ─────────────
-reads /jwt/jwt.token (Secret: envoy-jwt-token)
+Sidecar Lua filter                         App container
+──────────────────                         ─────────────
+reads /jwt/jwt.token (Secret envoy-jwt-token, apps ns)
 injects header:                            validates header:
-  X-Envoy-Internal-JWT: Bearer <token>  →  loadRSAPublicKey(/jwt-pubkey/jwt.pub)
-                                           rsa.VerifyPKCS1v15(...)
-                                           check iss == "envoy-sidecar"
-                                           check exp not expired
+  X-Envoy-Internal-JWT: Bearer <token>  →  verify RS256 with /jwt-pubkey/jwt.pub
+                                           check iss == "envoy-sidecar", check exp
 ```
 
-Private key → `envoy-jwt-token` Secret → **Envoy only**.  
-Public key → `app-jwt-pubkey` Secret → **app only**.  
-Neither container has access to the other's secret.
-
-### What "mode" controls
-
-Mode is set per environment and **only** changes Envoy's RBAC enforcement.  
-Transport (mTLS) and JWT injection are always on.
-
-| | DEV | QA | PROD |
-|---|---|---|---|
-| mTLS on every hop | ✅ | ✅ | ✅ |
-| JWT injection + validation | ✅ | ✅ | ✅ |
-| Certs mounted | ✅ | ✅ | ✅ |
-| RBAC CN / CIDR whitelist | not loaded | shadow — **logged**, not enforced | enforced — violations **blocked** |
-| `/call-blocked` result | mock responds | mock responds + `shadow_result=DENY` in log | connection reset |
+Private key (`jwt.key`, in `envoy-jwt-token`) → **Envoy only**.  
+Public key (`jwt.pub`, in `app-jwt-pubkey`) → **app only**. Neither container holds the other's.
 
 ---
 
-## Outbound enforcement: Envoy + NetworkPolicy
+## Egress enforcement: gateway + NetworkPolicy (two independent layers)
 
-### Why Envoy alone is not enough
+### Layer 1 — the gateway (application identity)
 
-The Envoy outbound listeners sit on `localhost:<port>`.  
-The app is configured to connect to those ports, and Envoy then proxies the traffic onward.
+The sidecar's egress listeners are plain `tcp_proxy` tunnels to the gateway; **the sidecar
+no longer authorizes egress**. The gateway is the single egress policy point: it terminates
+the pod's mTLS, reads the real **client-cert CN**, and allows/denies per the `gateway.routes`
+table. This is genuine identity-based authorization — not header- or IP-based.
 
-The problem: **nothing stops the app from calling a real destination directly**, bypassing
-Envoy entirely.  If the app opens a socket to `some-other-service:443` directly, Envoy
-never sees it.
+### Layer 2 — NetworkPolicy (kernel)
 
-### NetworkPolicy: the hard enforcement layer
+NetworkPolicy is evaluated by Calico **before any packet leaves a pod's network namespace**,
+regardless of which process opened the socket. It guarantees a pod cannot reach a target
+even if it tried to bypass its sidecar. Three policies are defined
+(`helm/templates/network-policy/`):
 
-Kubernetes NetworkPolicy is evaluated by the kernel CNI (Calico in this setup) **before
-any packet leaves the pod's network namespace**.  It does not care which process inside
-the pod opened the socket — app or sidecar.
-
-```
-App opens socket to unauthorized-host:443
-        │
-        ▼
-  NetworkPolicy egress check
-  "Is this destination in Pod A's egress whitelist?"
-        │
-        ├── NO  →  packet silently dropped at kernel level
-        │           app gets ETIMEDOUT or ECONNREFUSED
-        │
-        └── YES →  packet allowed out
-                        │
-                        ▼
-                  Envoy outbound listener
-                  (mTLS + RBAC logging/enforcement)
-```
-
-This gives two independent enforcement layers:
-
-| Layer | Enforces | Controlled by |
-|---|---|---|
-| NetworkPolicy | Which pods/ports are reachable at all | `helm/templates/network-policy/` |
-| Envoy RBAC | mTLS identity + CN/CIDR policy on allowed traffic | `helm/templates/envoy/_helpers.tpl` |
-
-### How NetworkPolicy is configured in this chart
-
-NetworkPolicy resources live in `helm/templates/network-policy/`.  
-They are rendered when `networkPolicy.enabled: true` (the default).
-
-```yaml
-# helm/values.yaml
-networkPolicy:
-  enabled: true   # set false to skip (e.g. if your CNI does not support it)
-```
-
-**Pod A policy** (`network-policy/pod-a.yaml`):
+**`pod-a-netpol`** (ns `apps`, selects `app=pod-a`)
 
 ```
-Ingress:
-  allow  haproxy → Pod A : 8443
-
-Egress:
-  allow  Pod A → pod-b       : 8443   (Pod B Envoy inbound)
-  allow  Pod A → kafka-mock  : 9092
-  allow  Pod A → llm-gateway : 8080
-  allow  Pod A → kube-dns    : 53/UDP+TCP   (required for STRICT_DNS in Envoy)
-  deny   everything else
+Ingress:  from namespace haproxy            → :8443
+Egress:   to app=pod-b (same namespace)     → :8443
+          to namespace gateway, app=gateway → :8443
+          to kube-dns                       → :53 UDP/TCP
 ```
 
-**Pod B policy** (`network-policy/pod-b.yaml`):
+**`pod-b-netpol`** (ns `apps`, selects `app=pod-b`)
 
 ```
-Ingress:
-  allow  Pod A → Pod B : 8443
-
-Egress:
-  allow  Pod B → kafka-mock    : 9092
-  allow  Pod B → sts-mock      : 8080
-  allow  Pod B → internal-api  : 8080
-  allow  Pod B → kube-dns      : 53/UDP+TCP
-  deny   everything else
+Ingress:  from app=pod-a (same namespace)   → :8443
+Egress:   to namespace gateway, app=gateway → :8443
+          to kube-dns                       → :53 UDP/TCP
 ```
 
-The selector `matchLabels: app: pod-a` on the NetworkPolicy means it applies to **all
-containers in the pod** (both the app container and the Envoy sidecar).  This is
-intentional: the policy is pod-scoped, not process-scoped.
-
-### One remaining gap: app bypassing Envoy to an allowed destination
-
-NetworkPolicy cannot distinguish *which process* in a pod opened a connection.  
-If Pod A's app calls `pod-b-service:8443` directly (skipping its own Envoy), NetworkPolicy
-allows it — because `pod-b:8443` is in the egress whitelist.
-
-**Pod B's Envoy closes this gap**: `require_client_certificate: true` means Pod B only
-accepts connections that present a CA-signed certificate.  The app container does not have
-one; the Envoy sidecar does.  Any direct app-to-app call therefore fails the mTLS
-handshake at Pod B's Envoy.
+**`gateway-netpol`** (ns `gateway`, selects `app=gateway`)
 
 ```
-Pod A app → pod-b-service:8443  (bypassing Pod A's Envoy)
-                │
-                ▼
-          Pod B Envoy: TLS handshake
-          "Client certificate required"
-                │
-          app has no cert → handshake fails → connection refused
+Ingress:  from namespace apps               → :8443
+Egress:   to namespace kafka                → :9092
+          to namespace llm-gateway          → :8080
+          to namespace internal-api         → :8080
+          to kube-dns                       → :53 UDP/TCP
+          (namespace blocked is deliberately absent)
 ```
 
-### CNI requirement
+So pods can reach **only** the gateway (and pod-a→pod-b directly); the gateway can reach
+**only** the three permitted upstream namespaces. `blocked` is unreachable at both layers.
 
-NetworkPolicy requires a CNI plugin that actually enforces the rules.  
-Kind's default CNI (`kindnet`) **does not**.  This chart's `make cluster` installs **Calico**
-automatically after the cluster is created.
+### Why both layers
 
-If you already have a cluster with a NetworkPolicy-capable CNI (Calico, Cilium, Weave),
-set `networkPolicy.enabled: true` and apply normally.  
-If your CNI does not support NetworkPolicy, set `networkPolicy.enabled: false` — resources
-will be skipped, Envoy still works, but the hard enforcement layer is absent.
+The gateway authorizes by identity (CN) but a pod could still try to open a raw socket to a
+mock. NetworkPolicy drops that at the kernel. Conversely NetworkPolicy is coarse
+(namespace/port) and cannot tell `pod-a` from `pod-b` — the gateway does. Together they give
+defence in depth.
+
+> **CNI requirement:** NetworkPolicy needs a CNI that enforces it. Kind's default `kindnet`
+> does **not**; `make cluster` installs **Calico**. On a cluster without a NetworkPolicy CNI,
+> set `networkPolicy.enabled: false` (the gateway/mTLS controls still work, the kernel layer
+> is just absent).
 
 ---
 
@@ -708,68 +684,65 @@ will be skipped, Envoy still works, but the hard enforcement layer is absent.
 ```
 envoy-sidecar-test/
 ├── testapp/
-│   ├── main.go          single Go binary; role set by APP_ROLE env var
-│   │                    roles: pod-a | pod-b | mock
+│   ├── main.go          single Go binary; role set by APP_ROLE (pod-a | pod-b | mock)
 │   └── Dockerfile
 │
 ├── helm/
 │   ├── Chart.yaml
-│   ├── values.yaml          base values (all environments)
-│   ├── values-dev.yaml      DEV overrides  (mode: dev)
-│   ├── values-qa.yaml       QA overrides   (mode: qa)
-│   ├── values-prod.yaml     PROD overrides (mode: prod)
+│   ├── values.yaml            base values: namespaces, gateway.routes, ports, ...
+│   ├── values-dev.yaml        DEV  (mode: dev)
+│   ├── values-qa.yaml         QA   (mode: qa)
+│   ├── values-prod.yaml       PROD (mode: prod)
+│   ├── values-openshift.yaml  OpenShift overlay (null UIDs, no toy f5/haproxy)
 │   └── templates/
-│       ├── namespace.yaml
+│       ├── _helpers.tpl              chart-wide FQDN helpers
 │       ├── envoy/
-│       │   ├── _helpers.tpl          all Envoy config logic (named templates)
+│       │   ├── _helpers.tpl          sidecar Envoy config (inbound RBAC, JWT, egress→gw)
 │       │   └── configmap-envoy.yaml  renders pod-a + pod-b ConfigMaps
+│       ├── gateway/          egress gateway: configmap (SNI routes), deployment, service
 │       ├── f5-sim/           nginx simulating F5 BIG-IP
 │       ├── haproxy/          HAProxy re-encrypt tier
-│       ├── pod-a/            Pod A deployment + service
-│       ├── pod-b/            Pod B deployment + service
-│       ├── mocks/            kafka, llm-gateway, sts, internal-api, blocked mocks
+│       ├── pod-a/  pod-b/    app + Envoy sidecar deployments + services
+│       ├── mocks/            kafka, llm-gateway, internal-api, blocked
 │       ├── client/           test-client pod (curl + certs)
-│       └── network-policy/   Pod A + Pod B NetworkPolicy resources
+│       └── network-policy/   pod-a, pod-b, gateway policies
 │
-├── helmfile.yaml        environment-aware deployment (dev / qa / prod)
+├── helmfile.yaml        environments: dev/qa/prod + openshift-{dev,qa,prod}
 ├── kind-config.yaml     Kind cluster config (Calico CNI, NodePort :30443)
 ├── scripts/
-│   └── generate-certs.sh   self-signed CA + leaf certs + JWT keypair + k8s secrets
+│   ├── generate-certs.sh      CA + leaf certs + JWT keypair + namespaces + secrets
+│   └── install-tools-wsl2.sh  one-shot tool install for WSL2/Ubuntu
+├── docs/SEQUENCE.md     full sequence diagram (ports, certs, NetworkPolicy)
+├── .github/workflows/ci.yaml  lint + dev/qa/prod integration matrix on Kind
 ├── Makefile
 └── .gitignore           excludes certs/
 ```
 
 ---
 
+## CI
+
+`.github/workflows/ci.yaml` runs on every PR:
+
+1. **lint** — `helm lint` + `helm template` rendered through a YAML parser for dev/qa/prod.
+2. **integration matrix** — one job per mode: spins up Kind + Calico, `make <mode>`, then
+   `make test-<mode>`. On failure it traces each Pod A endpoint and dumps the gateway,
+   f5-sim, haproxy, pod-a and pod-b logs.
+
+---
+
 ## Moving to production
 
-When you are satisfied with the toy setup:
-
-1. **Replace cert generation** — swap `scripts/generate-certs.sh` with an init container
-   that calls your Vault PKI engine to issue certs at pod startup.
-
-2. **Tighten CIDRs and CNs** — update `values-prod.yaml`:
-   ```yaml
-   podA:
-     inbound:
-       allowedSourceCIDRs:
-         - "10.x.x.x/27"    # your F5 egress CIDR
-       allowedClientCNs:
-         - "your-f5-client-cn"
-   ```
-
-3. **Add the sidecar to your existing chart** — the `helm/templates/envoy/` directory
-   and its values keys are self-contained.  Copy them next to your existing templates,
-   then add to your pod specs:
-   ```yaml
-   # In your existing Deployment template:
-   containers:
-     {{- include "envoy.sidecarContainer" . | nindent 6 }}
-   volumes:
-     {{- include "envoy.volumes" . | nindent 6 }}
-   ```
-
-4. **Update app upstream config** — point each outbound target to its Envoy localhost
-   listener port (e.g. `localhost:19080` for Pod B, `localhost:19092` for Kafka).
-
-5. **Apply NetworkPolicy** with real CIDRs from your cluster's pod CIDR ranges.
+1. **Replace cert generation** — swap `scripts/generate-certs.sh` for an init container or
+   cert-manager/Vault PKI issuing per-workload certs (keep `CN=pod-a` / `CN=pod-b` distinct
+   so the gateway can authorize them).
+2. **Use your real F5 + HAProxy** — disable the toy tiers (`f5Sim.enabled=false`,
+   `haproxy.enabled=false`, as the OpenShift overlay does) and point your real HAProxy at
+   `pod-a-service.<apps-ns>.svc`. Ensure it forwards the client CN header
+   (`podA.inbound.cnHeader`).
+3. **Tighten inbound CN/CIDR** in `values-prod.yaml` (`podA.inbound.allowedClientCNs`,
+   `allowedSourceCIDRs`) to your real F5 identity and egress CIDR.
+4. **Define the egress routes** in `gateway.routes` — real SNIs, upstream
+   host/namespace/port, and the allowed CN per route.
+5. **Apply NetworkPolicy** with your real namespaces and pod CIDRs; keep the default-deny +
+   explicit-allow shape and extend it to every tier (this toy only policies the pods + gateway).

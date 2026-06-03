@@ -3,7 +3,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: haproxy
-  namespace: {{ .Values.global.namespace }}
+  namespace: {{ .Values.namespaces.haproxy }}
   labels:
     app: haproxy
 spec:

@@ -1,0 +1,142 @@
+{{- if .Values.gateway.enabled }}
+{{/*
+Egress gateway Envoy config.
+
+Pods open an mTLS connection with SNI = <target>. The TLS inspector reads the
+SNI, the matching filter chain terminates the pod's mTLS, a network RBAC filter
+authorizes the pod's client-cert CN for that target, then tcp_proxy re-encrypts
+to the real upstream with the gateway's own cert.
+
+Blocking:
+  - no route:  an SNI with no matching filter chain (e.g. "blocked") is rejected
+               by Envoy ("no matching filter chain found").
+  - CN denied: the RBAC filter denies a CN not listed for that target.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: {{ .Values.namespaces.gateway }}
+  labels:
+    app: {{ .Values.gateway.name }}
+data:
+  envoy.yaml: |
+    admin:
+      address:
+        socket_address:
+          address: 127.0.0.1
+          port_value: {{ .Values.gateway.ports.admin }}
+
+    static_resources:
+      listeners:
+        # ── Health listener (plain HTTP 200 on 0.0.0.0 for kubelet probes) ──
+        - name: health
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: {{ .Values.gateway.ports.health }}
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: health
+                    codec_type: AUTO
+                    route_config:
+                      name: health
+                      virtual_hosts:
+                        - name: health
+                          domains: ["*"]
+                          routes:
+                            - match: { prefix: "/" }
+                              direct_response:
+                                status: 200
+                                body:
+                                  inline_string: "OK"
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+        # ── Egress listener (SNI-routed; terminate pod mTLS, re-encrypt upstream) ──
+        - name: egress
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: {{ .Values.gateway.ports.listen }}
+          listener_filters:
+            - name: envoy.filters.listener.tls_inspector
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+          filter_chains:
+{{- range .Values.gateway.routes }}
+            - filter_chain_match:
+                server_names: ["{{ .sni }}"]
+              transport_socket:
+                name: envoy.transport_sockets.tls
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+                  require_client_certificate: true
+                  common_tls_context:
+                    tls_certificates:
+                      - certificate_chain:
+                          filename: {{ $.Values.gateway.tls.mountPath }}/tls.crt
+                        private_key:
+                          filename: {{ $.Values.gateway.tls.mountPath }}/tls.key
+                    validation_context:
+                      trusted_ca:
+                        filename: {{ $.Values.gateway.tls.mountPath }}/ca.crt
+              filters:
+                # Authorize the calling pod's client-cert CN for this target.
+                - name: envoy.filters.network.rbac
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.rbac.v3.RBAC
+                    stat_prefix: "egress_{{ .sni }}_"
+                    rules:
+                      action: ALLOW
+                      policies:
+                        allowed-cns:
+                          permissions:
+                            - any: true
+                          principals:
+{{- range .allowedCNs }}
+                            - authenticated:
+                                principal_name:
+                                  exact: "{{ . }}"
+{{- end }}
+                - name: envoy.filters.network.tcp_proxy
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                    stat_prefix: "egress_{{ .sni }}"
+                    cluster: "up_{{ .sni }}"
+{{- end }}
+
+      clusters:
+{{- range .Values.gateway.routes }}
+        - name: "up_{{ .sni }}"
+          type: STRICT_DNS
+          connect_timeout: 5s
+          load_assignment:
+            cluster_name: "up_{{ .sni }}"
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: {{ .upstreamHost }}.{{ .upstreamNamespace }}.svc.{{ $.Values.global.clusterDomain }}
+                          port_value: {{ .upstreamPort }}
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+              common_tls_context:
+                tls_certificates:
+                  - certificate_chain:
+                      filename: {{ $.Values.gateway.tls.mountPath }}/tls.crt
+                    private_key:
+                      filename: {{ $.Values.gateway.tls.mountPath }}/tls.key
+                validation_context:
+                  trusted_ca:
+                    filename: {{ $.Values.gateway.tls.mountPath }}/ca.crt
+{{- end }}
+{{- end }}
