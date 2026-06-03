@@ -42,6 +42,9 @@ ca()        { kubectl exec -n "$NS_CLIENT" client -- curl -sf --max-time 8 $CERT
 ca_nocert() { kubectl exec -n "$NS_CLIENT" client -- curl -sf --max-time 8 --cacert /certs/ca.crt "$1" >/dev/null 2>&1 && echo ALLOW || echo DENY; }
 # exec into Pod B app, curl an HTTP egress port (→ sidecar → gateway → upstream)
 pb_http()   { kubectl exec -n "$NS_APPS" "$1" -c app -- curl -sf --max-time 8 "http://localhost:$2/echo" >/dev/null 2>&1 && echo ALLOW || echo DENY; }
+# TCP egress probe (kafka): hold the connection open (sleep) so the echo reply
+# returns before nc closes on stdin EOF; ALLOW only if PONG round-trips.
+tcp_ping()  { kubectl exec -n "$NS_APPS" "$1" -c app -- sh -c "{ printf 'PING\n'; sleep 3; } | nc -w 5 localhost $2 2>/dev/null" 2>/dev/null | grep -q PONG && echo ALLOW || echo DENY; }
 # exec into Pod A app, reach a destination DIRECTLY (bypassing the gateway);
 # NetworkPolicy should silently drop it → curl times out (exit 28) → DROPPED
 np_direct() { kubectl exec -n "$NS_APPS" "$1" -c app -- curl -s --max-time 6 -o /dev/null "$2" >/dev/null 2>&1; [ $? -eq 28 ] && echo DROPPED || echo REACHED; }
@@ -61,9 +64,10 @@ run_requests() {
   report DENY  "$(ca "$F5/call-internal")" "pod-a → internal-api (CN not authorized)"
   report DENY  "$(ca "$F5/call-blocked")"  "pod-a → blocked      (no route)"
   echo "── POD B EGRESS — via gateway, authorized by CN=pod-b ────────────"
-  report ALLOW "$(pb_http "$pod_b" 19094)" "pod-b → internal-api (gateway)"
-  report DENY  "$(pb_http "$pod_b" 14443)" "pod-b → llm-gateway  (CN not authorized)"
-  report DENY  "$(pb_http "$pod_b" 19999)" "pod-b → blocked      (no route)"
+  report ALLOW "$(tcp_ping "$pod_b" 19092)" "pod-b → kafka        (gateway, PONG round-trip)"
+  report ALLOW "$(pb_http  "$pod_b" 19094)" "pod-b → internal-api (gateway)"
+  report DENY  "$(pb_http  "$pod_b" 14443)" "pod-b → llm-gateway  (CN not authorized)"
+  report DENY  "$(pb_http  "$pod_b" 19999)" "pod-b → blocked      (no route)"
 }
 
 # ── kernel-level NetworkPolicy checks (slow: rely on connect timeouts) ────────
