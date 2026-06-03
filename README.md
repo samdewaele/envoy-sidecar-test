@@ -4,6 +4,17 @@ Toy test stack for an Envoy-based mTLS sidecar pattern.
 Validates the full traffic chain — external client through F5/HAProxy simulation into two
 Kubernetes pods — before the sidecar is integrated into the production application chart.
 
+**Topology:** every component runs in its own namespace (`f5`, `haproxy`, `apps`,
+`gateway`, `client`, `kafka`, `internal-api`, `llm-gateway`, `blocked`) to mirror a real
+multi-tenant cluster.
+
+**Two enforcement planes:**
+- **Sidecars** handle **inbound** — terminate client mTLS and enforce the CN whitelist
+  (dev: off, qa: shadow/logged, prod: enforced) plus JWT injection.
+- **Egress gateway** (a standalone Envoy) handles **outbound** — pods mTLS to it with a
+  per-target SNI; it terminates, authorizes by the pod's client-cert CN, and re-encrypts
+  to the upstream. Pod-to-pod (pod-a→pod-b) stays direct sidecar-to-sidecar.
+
 ---
 
 ## Setup
@@ -465,11 +476,48 @@ helmfile -e prod diff
 
 ## Architecture
 
+### Egress gateway
+
+Pods do not reach external systems directly. Each sidecar tunnels every external target
+to the shared egress gateway over mTLS, setting the **SNI to the target name**. The gateway
+reads the SNI to route, terminates the pod's mTLS, authorizes the pod's **client-cert CN**
+for that target, then re-encrypts (fresh mTLS) to the real upstream.
+
+```
+  pod-a/pod-b app ──plain──▶ sidecar egress listener ──mTLS, SNI=<target>──▶ gateway
+                                                                               │
+                              terminate mTLS · check CN · re-encrypt mTLS ◀────┘
+                                                                               │
+                                                                               ▼
+                                                            kafka / llm-gateway / internal-api
+```
+
+The gateway blocks two ways:
+- **CN denied** — the SNI route exists but the calling pod's CN is not authorized for it.
+- **No route** — the SNI has no filter chain (e.g. `blocked`); Envoy rejects the connection.
+
+**Authorization matrix** (enforced at the gateway, identical in every mode):
+
+| From | pod-b (direct) | kafka | llm-gateway | internal-api | blocked |
+|---|---|---|---|---|---|
+| **pod-a** | ✅ direct | ✅ via gw | ✅ via gw | ❌ CN denied | ❌ no route |
+| **pod-b** | — | ✅ via gw | ❌ CN denied | ✅ via gw | ❌ no route |
+
+Pod A and Pod B carry **distinct identity certs** (`CN=pod-a` / `CN=pod-b`) so the gateway
+can tell them apart. Egress is no longer authorized in the sidecar — the gateway is the
+single egress policy point. NetworkPolicy backs this at the kernel: pods may only egress to
+the gateway namespace; the gateway may only egress to the allowed target namespaces.
+
 ### Full traffic chain
+
+> **Note:** the diagram below illustrates the **inbound** chain (client → F5 → HAProxy →
+> Pod A → Pod B) and predates the namespace split. Outbound now flows through the egress
+> gateway as described in [Egress gateway](#egress-gateway) above, and each component lives
+> in its own namespace. The inbound mTLS + CN-whitelisting path is unchanged.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  Kind cluster  (namespace: envoy-test)                                      │
+│  Kind cluster  (per-component namespaces; inbound path shown)               │
 │                                                                             │
 │  ┌──────────────┐                                                           │
 │  │ test-client  │  kubectl exec → curl with client cert                    │
