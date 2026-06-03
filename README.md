@@ -269,6 +269,12 @@ and the ones that must be blocked — and prints a pass/fail table. A correctly-
 connection counts as ✅ (the observed behaviour matched the expectation). It returns
 non-zero if any cell disagrees, so it doubles as a post-deploy gate.
 
+For a **live** view, `make probe-watch` re-runs the request matrix every 5 seconds as a
+refreshing dashboard (`make probe-watch INTERVAL=10` to change the cadence; Ctrl-C to stop).
+It's handy for watching behaviour while you tail logs or change config. The watch loop runs
+the inbound + egress requests only; the slower kernel-level NetworkPolicy timeout checks run
+in the one-shot `make probe`.
+
 ```
 ════ INBOUND — sidecar mTLS + CN whitelist (Pod A) ═══════════════════
   ✅ client WITH valid cert → pod-a /health             (ALLOW)

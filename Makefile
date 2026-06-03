@@ -34,7 +34,7 @@ CALICO_URL     := https://raw.githubusercontent.com/projectcalico/calico/$(CALIC
 
 .PHONY: help cluster calico registry build push certs plugins \
         dev qa prod \
-        egress-matrix test-dev test-qa test-prod probe \
+        egress-matrix test-dev test-qa test-prod probe probe-watch \
         logs-f5 logs-haproxy logs-a logs-b logs-gw \
         status down clean
 
@@ -65,6 +65,7 @@ help:
 	@echo "    make test-qa      smoke test QA   (+ inbound shadow log)"
 	@echo "    make test-prod    smoke test PROD (+ no-cert rejection)"
 	@echo "    make probe        full connectivity matrix (valid + invalid + netpol)"
+	@echo "    make probe-watch  live: re-run the request matrix every 5s (INTERVAL=N)"
 	@echo ""
 	@echo "  Logs"
 	@echo "    make logs-f5      tail f5-sim (nginx) logs"
@@ -211,6 +212,14 @@ test-prod: egress-matrix
 probe:
 	@chmod +x scripts/probe.sh
 	@./scripts/probe.sh
+
+# Live dashboard — re-runs the request matrix every INTERVAL seconds (default 5).
+#   make probe-watch              # every 5s
+#   make probe-watch INTERVAL=10  # every 10s
+INTERVAL ?= 5
+probe-watch:
+	@chmod +x scripts/probe.sh
+	@./scripts/probe.sh watch $(INTERVAL)
 
 # ── Logs ─────────────────────────────────────────────────────────────────────
 
