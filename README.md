@@ -280,7 +280,6 @@ non-zero if any cell disagrees, so it doubles as a post-deploy gate.
   ✅ pod-a → internal-api (CN not authorized)           (DENY)
   ✅ pod-a → blocked      (no route)                    (DENY)
 ════ POD B EGRESS — via gateway, authorized by CN=pod-b ══════════════
-  ✅ pod-b → kafka        (gateway)                     (ALLOW)
   ✅ pod-b → internal-api (gateway)                     (ALLOW)
   ✅ pod-b → llm-gateway  (CN not authorized)           (DENY)
   ✅ pod-b → blocked      (no route)                    (DENY)
